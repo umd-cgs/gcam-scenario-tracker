@@ -1,0 +1,23 @@
+# Standalone local preview. Does not load the production .env or contact Google.
+name: gcam-tracker-local
+services:
+  backend:
+    image: gcam-tracker-backend:1.0.0
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      TRACKER_OFFLINE: "1"
+    ports:
+      - "127.0.0.1:8000:8000"
+  frontend:
+    image: gcam-tracker-frontend:1.0.0
+    build:
+      context: ./frontend
+    ports:
+      - "127.0.0.1:8080:80"
+    volumes:
+      - ./frontend/Caddyfile.local:/etc/caddy/Caddyfile:ro
+    depends_on:
+      backend:
+        condition: service_healthy
