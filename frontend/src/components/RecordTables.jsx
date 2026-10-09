@@ -32,6 +32,10 @@ export function ScenarioTable({
   onDownload,
   selected,
   onSelection,
+  savedColumnFilters,
+  onSavedColumnFiltersChange,
+  savedColumnVisibility,
+  onSavedColumnVisibilityChange,
   compact = false,
 }) {
   const columns = [
@@ -168,13 +172,25 @@ export function ScenarioTable({
       label="Scenarios"
       selected={selected}
       onSelection={onSelection}
+      savedColumnFilters={savedColumnFilters}
+      onSavedColumnFiltersChange={onSavedColumnFiltersChange}
+      savedColumnVisibility={savedColumnVisibility}
+      onSavedColumnVisibilityChange={onSavedColumnVisibilityChange}
       emptyTitle="No scenarios found"
       emptyText="Adjust your filters, or upload a configuration to start tracking a scenario."
     />
   );
 }
 
-export function InputTable({ rows, onEdit, compact = false }) {
+export function InputTable({
+  rows,
+  onEdit,
+  savedColumnFilters,
+  onSavedColumnFiltersChange,
+  savedColumnVisibility,
+  onSavedColumnVisibilityChange,
+  compact = false,
+}) {
   const columns = [
     {
       key: "file_name",
@@ -236,6 +252,10 @@ export function InputTable({ rows, onEdit, compact = false }) {
       rows={rows}
       columns={columns}
       label="Input files"
+      savedColumnFilters={savedColumnFilters}
+      onSavedColumnFiltersChange={onSavedColumnFiltersChange}
+      savedColumnVisibility={savedColumnVisibility}
+      onSavedColumnVisibilityChange={onSavedColumnVisibilityChange}
       initialSort="file_name"
       initialDirection="asc"
       emptyTitle="No input files found"

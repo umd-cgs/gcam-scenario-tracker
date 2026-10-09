@@ -473,6 +473,35 @@ main {
 .search-field .icon-button {
   padding: 0;
 }
+.saved-filter-bar,
+.saved-filter-form {
+  display: flex;
+  align-items: end;
+  gap: 9px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.saved-filter-bar label,
+.saved-filter-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.saved-filter-bar select,
+.saved-filter-form input {
+  min-height: 34px;
+  min-width: 190px;
+  max-width: 260px;
+  padding: 7px 10px;
+  font-size: 11px;
+}
+.saved-filter-error {
+  color: var(--error-text);
+  font-size: 11px;
+  margin: 0 0 10px;
+}
 .table-card {
   background: var(--surface);
   border: 1px solid var(--line);

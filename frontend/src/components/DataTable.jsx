@@ -29,6 +29,10 @@ export default function DataTable({
   onSelection,
   initialSort = "recency",
   initialDirection = "desc",
+  savedColumnFilters,
+  onSavedColumnFiltersChange,
+  savedColumnVisibility,
+  onSavedColumnVisibilityChange,
   emptyTitle = "No records to show",
   emptyText = "Try adjusting your search or filters.",
 }) {
@@ -37,13 +41,36 @@ export default function DataTable({
   const [sorting, setSorting] = useState([
     { id: initialSort, desc: initialDirection === "desc" },
   ]);
-  const [columnFilters, setColumnFilters] = useState([]);
-  const [columnVisibility, setColumnVisibility] = useState(() =>
-    Object.fromEntries([
-      ...columns.map((column) => [column.key, !column.hidden]),
-      ["recency", false],
-    ]),
+  const [localColumnFilters, setLocalColumnFilters] = useState([]);
+  const columnFilters = savedColumnFilters ?? localColumnFilters;
+  const setColumnFilters = onSavedColumnFiltersChange ?? setLocalColumnFilters;
+  const defaultColumnVisibility = Object.fromEntries([
+    ...columns.map((column) => [column.key, !column.hidden]),
+    ["recency", false],
+  ]);
+  const [localColumnVisibility, setLocalColumnVisibility] = useState(
+    () => defaultColumnVisibility,
   );
+  const columnVisibility = {
+    ...(savedColumnVisibility === undefined
+      ? localColumnVisibility
+      : { ...defaultColumnVisibility, ...savedColumnVisibility }),
+    ...Object.fromEntries(columnFilters.map(({ id }) => [id, true])),
+  };
+  useEffect(() => {
+    if (savedColumnFilters?.length) setShowFilters(true);
+  }, [savedColumnFilters]);
+  function changeColumnVisibility(updater) {
+    const next = typeof updater === "function" ? updater(columnVisibility) : updater;
+    if (onSavedColumnVisibilityChange) {
+      onSavedColumnVisibilityChange(Object.fromEntries(
+        Object.entries(next).filter(([key, shown]) =>
+          key in defaultColumnVisibility && shown !== defaultColumnVisibility[key]),
+      ));
+    } else {
+      setLocalColumnVisibility(next);
+    }
+  }
   const rowSelection = useMemo(
     () => Object.fromEntries([...(selected || [])].map((id) => [id, true])),
     [selected],
@@ -99,7 +126,7 @@ export default function DataTable({
     getRowId: (row) => String(row.id),
     onSortingChange: setSorting,
     onColumnFiltersChange: setColumnFilters,
-    onColumnVisibilityChange: setColumnVisibility,
+    onColumnVisibilityChange: changeColumnVisibility,
     onRowSelectionChange: (updater) => {
       const next =
         typeof updater === "function" ? updater(rowSelection) : updater;

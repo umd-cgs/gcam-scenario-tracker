@@ -16,6 +16,11 @@ backend's port is not published. Google credentials are mounted only into the ba
 - **Frontend:** React, Vite, React Router, TanStack Table, React Select, Radix Dialog, Sonner, Lucide icons.
 - **Backend:** Flask, one synchronous Gunicorn worker, existing GCAM parsing and Google integrations.
 - **Storage:** Sheets for records; Drive for configuration XML. Input uploads store metadata only.
+- **Saved filters:** Shared named dashboard views are stored in a `SavedFilters` worksheet,
+  created automatically on first connection. A view captures search, project/status, and
+  table-column filters, and selected columns for either Scenarios or Input files. The optional “saved by” name
+  is a display label; without individual accounts, anyone with tracker access can apply,
+  update, or delete any saved view.
 - **Deploy:** Docker Compose; images can be transferred as a compressed archive without a registry.
 
 **[Full Lightsail deployment instructions →](deploy/README.md)**
@@ -207,6 +212,8 @@ All browser API responses are JSON except XML/XLSX downloads. Errors include
 | GET | `/api/data?refresh=1` | Invalidate the 60-second cache and reload |
 | GET | `/api/health` | Google-backed readiness check using the data cache |
 | GET | `/api/mappings` | Project/person mappings |
+| GET / POST | `/api/saved-filters` | List or create shared named filters |
+| PATCH / DELETE | `/api/saved-filters/<id>` | Update filter settings or delete a saved filter |
 | GET / PATCH / DELETE | `/api/scenarios/<id>` | Read, edit, delete a scenario |
 | GET / PATCH | `/api/inputs/<id>` | Read/edit input metadata |
 | POST | `/api/uploads/configuration` | Multipart `config_file` XML |

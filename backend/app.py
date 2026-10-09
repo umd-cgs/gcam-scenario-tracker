@@ -320,14 +320,14 @@ def get_file_content(file_id):
     return download_file_from_drive(file_id)
 
 gc = sheet = scenarios_sheet = inputs_sheet = junction_sheet = None
-file_storage_sheet = zaratan_logs_sheet = None
+file_storage_sheet = zaratan_logs_sheet = saved_filters_sheet = None
 _google_retry_at = 0
 
 
 def initialize_google():
     """Connect on demand; retry failures without restarting the container."""
     global gc, sheet, scenarios_sheet, inputs_sheet, junction_sheet
-    global file_storage_sheet, zaratan_logs_sheet, _google_retry_at
+    global file_storage_sheet, zaratan_logs_sheet, saved_filters_sheet, _google_retry_at
     if sheets_available():
         return True
     if os.environ.get('TRACKER_OFFLINE') == '1' or time.monotonic() < _google_retry_at:
@@ -356,13 +356,19 @@ def initialize_google():
         except gspread.exceptions.WorksheetNotFound:
             zaratan_logs_sheet = sheet.add_worksheet(title='ZaratanLogs', rows=1000, cols=len(ZARATAN_LOG_COLUMNS))
             zaratan_logs_sheet.append_row(ZARATAN_LOG_COLUMNS)
-    
+
+        try:
+            saved_filters_sheet = sheet.worksheet('SavedFilters')
+        except gspread.exceptions.WorksheetNotFound:
+            saved_filters_sheet = sheet.add_worksheet(title='SavedFilters', rows=1000, cols=6)
+            saved_filters_sheet.append_row(['id', 'tab', 'name', 'saved_by', 'filters_json', 'created_at'])
+
         print("✓ Google Sheets connection successful")
         return True
     except Exception:
         app.logger.exception('Google Sheets initialization failed')
         gc = sheet = scenarios_sheet = inputs_sheet = junction_sheet = None
-        file_storage_sheet = zaratan_logs_sheet = None
+        file_storage_sheet = zaratan_logs_sheet = saved_filters_sheet = None
         return False
 
 
@@ -693,6 +699,136 @@ def allowed_file(filename):
 
 def api_error(message, status=400):
     return jsonify({'status': 'error', 'message': message}), status
+
+
+# Saved views are shared because the tracker has no individual accounts. The
+# saved_by field is a display label only; it does not grant edit permissions.
+SAVED_FILTER_COLUMNS = {
+    'scenarios': {'scenario_name', 'project_name', 'status', 'person',
+                  'submitted', 'input_count', 'personal_scenario_name',
+                  'based_on', 'description', 'errors', 'additional_notes',
+                  'uploaded_by', 'job_id', 'duration', 'component_key',
+                  'finished', 'date_run', 'upload_date', 'zaratan_link'},
+    'inputs': {'file_name', 'folder_location', 'regions_modified',
+               'years_modified', 'sectors_modified', 'scenario_count',
+               'policy_name', 'description', 'additional_notes',
+               'uploaded_by', 'component_key', 'upload_date'},
+}
+
+
+def validate_saved_filter_state(value, tab):
+    required = {'search', 'project', 'status', 'columns', 'column_visibility'}
+    if not isinstance(value, dict) or set(value) != required:
+        return None
+    if any(not isinstance(value[key], str) or len(value[key]) > 200
+           for key in ('search', 'project', 'status')):
+        return None
+    if tab == 'inputs' and (value['project'] or value['status']):
+        return None
+    columns = value['columns']
+    if not isinstance(columns, list) or len(columns) > len(SAVED_FILTER_COLUMNS[tab]):
+        return None
+    seen = set()
+    for item in columns:
+        if not isinstance(item, dict) or set(item) != {'id', 'value'}:
+            return None
+        key, selected = item['id'], item['value']
+        if not isinstance(key, str) or key not in SAVED_FILTER_COLUMNS[tab] or key in seen:
+            return None
+        seen.add(key)
+        if key in ('project_name', 'person'):
+            if (not isinstance(selected, list) or len(selected) > 100 or
+                    any(not isinstance(v, str) or len(v) > 200 for v in selected)):
+                return None
+        elif not isinstance(selected, str) or len(selected) > 200:
+            return None
+    visibility = value['column_visibility']
+    hideable = SAVED_FILTER_COLUMNS[tab] - ({'scenario_name'} if tab == 'scenarios' else {'file_name'})
+    if (not isinstance(visibility, dict) or len(visibility) > len(hideable) or
+            any(not isinstance(key, str) or key not in hideable or
+                not isinstance(shown, bool) for key, shown in visibility.items())):
+        return None
+    return value
+
+
+def read_saved_filters():
+    rows = saved_filters_sheet.get_all_values()
+    views = []
+    for row in rows[1:]:
+        padded = (row + [''] * 6)[:6]
+        view_id, tab, name, saved_by, state_json, created_at = padded
+        if tab not in SAVED_FILTER_COLUMNS:
+            continue
+        try:
+            state = validate_saved_filter_state(json.loads(state_json), tab)
+        except (TypeError, ValueError):
+            state = None
+        if view_id and state is not None:
+            views.append({'id': view_id, 'tab': tab, 'name': name,
+                          'saved_by': saved_by, 'filters': state,
+                          'created_at': created_at})
+    return views
+
+
+@app.get('/api/saved-filters')
+def list_saved_filters():
+    return jsonify({'saved_filters': read_saved_filters()})
+
+
+@app.post('/api/saved-filters')
+def create_saved_filter():
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or set(body) != {'tab', 'name', 'saved_by', 'filters'}:
+        return api_error('Provide a tab, name, saved by label, and filters')
+    tab, name, saved_by = body['tab'], body['name'], body['saved_by']
+    if not isinstance(tab, str) or tab not in SAVED_FILTER_COLUMNS:
+        return api_error('Unknown filter tab')
+    if (not isinstance(name, str) or not 1 <= len(name.strip()) <= 80 or
+            not isinstance(saved_by, str) or len(saved_by.strip()) > 80):
+        return api_error('Name is required (up to 80 characters); saved by is optional (up to 80)')
+    state = validate_saved_filter_state(body['filters'], tab)
+    if state is None:
+        return api_error('Invalid filter settings')
+    name, saved_by = name.strip(), saved_by.strip()
+    if any(view['tab'] == tab and view['name'].casefold() == name.casefold()
+           for view in read_saved_filters()):
+        return api_error('A saved filter with this name already exists for this tab', 409)
+    view = {'id': str(uuid.uuid4()), 'tab': tab, 'name': name,
+            'saved_by': saved_by, 'filters': state,
+            'created_at': datetime.now().astimezone().isoformat(timespec='seconds')}
+    saved_filters_sheet.append_row([view['id'], tab, name, saved_by,
+                                    json.dumps(state, separators=(',', ':')),
+                                    view['created_at']], value_input_option='RAW')
+    return jsonify(view), 201
+
+
+@app.patch('/api/saved-filters/<view_id>')
+def update_saved_filter(view_id):
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or set(body) != {'filters'}:
+        return api_error('Provide filter settings')
+    row = find_row_by_id(saved_filters_sheet, view_id)
+    if not row or row == 1:
+        return api_error('Saved filter not found', 404)
+    values = (saved_filters_sheet.row_values(row) + [''] * 6)[:6]
+    tab = values[1]
+    if tab not in SAVED_FILTER_COLUMNS:
+        return api_error('Saved filter is invalid', 502)
+    state = validate_saved_filter_state(body['filters'], tab)
+    if state is None:
+        return api_error('Invalid filter settings')
+    saved_filters_sheet.update_cell(row, 5, json.dumps(state, separators=(',', ':')))
+    return jsonify({'id': view_id, 'tab': tab, 'name': values[2],
+                    'saved_by': values[3], 'filters': state, 'created_at': values[5]})
+
+
+@app.delete('/api/saved-filters/<view_id>')
+def delete_saved_filter(view_id):
+    row = find_row_by_id(saved_filters_sheet, view_id)
+    if not row or row == 1:
+        return api_error('Saved filter not found', 404)
+    saved_filters_sheet.delete_rows(row)
+    return jsonify({'status': 'success'})
 
 
 @app.before_request
