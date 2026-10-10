@@ -1,0 +1,14 @@
+# Optional overlay for local testing with your own Google test data.
+# Usage: docker compose --env-file .env -f compose.local.yaml -f compose.google.yaml up -d
+# Only the backend receives these values. Frontend/backend ports remain loopback-only.
+services:
+  backend:
+    environment:
+      TRACKER_OFFLINE: "0"
+      GOOGLE_SHEET_ID: ${GOOGLE_SHEET_ID:?Set GOOGLE_SHEET_ID to your test Sheet ID}
+      DRIVE_CONFIGS_FOLDER_ID: ${DRIVE_CONFIGS_FOLDER_ID:?Set DRIVE_CONFIGS_FOLDER_ID to your test folder ID}
+      GOOGLE_DRIVE_FOLDER_ID: ${GOOGLE_DRIVE_FOLDER_ID:-}
+      DRIVE_INPUTS_FOLDER_ID: ${DRIVE_INPUTS_FOLDER_ID:-}
+      GOOGLE_CREDENTIALS_BASE64: ${GOOGLE_CREDENTIALS_BASE64:-}
+      GOOGLE_APPLICATION_CREDENTIALS_JSON: ${GOOGLE_APPLICATION_CREDENTIALS_JSON:-}
+      INGEST_TOKEN: ${INGEST_TOKEN:-}

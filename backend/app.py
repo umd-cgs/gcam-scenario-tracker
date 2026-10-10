@@ -10,27 +10,25 @@ import difflib
 import uuid
 from datetime import datetime
 from pathlib import Path
-from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, Response
+from flask import Flask, request, jsonify, Response, send_file
+from werkzeug.exceptions import HTTPException
+from werkzeug.middleware.proxy_fix import ProxyFix
+import hmac
+import time
+import io
 from werkzeug.utils import secure_filename
 from lxml import etree
 import gspread
 from google.oauth2.service_account import Credentials
 
-# Load variables from a local .env file for development.
-try:
+# Opt in explicitly for local development; containers receive runtime environment.
+if os.environ.get('LOAD_DOTENV') == '1':
     from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
+    load_dotenv(Path(__file__).resolve().parents[1] / '.env')
 
-# =============================================================================
-# Configuration
-# =============================================================================
-
-app = Flask(__name__)
-app.config['SECRET_KEY'] = 'change-this-to-a-random-secret-key'
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max
-
+app = Flask(__name__, static_folder=None)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
 
 
 def _parse_timestamp(value):
@@ -53,7 +51,6 @@ def _parse_timestamp(value):
     return None
 
 
-@app.template_filter('humandatetime')
 def humandatetime(value):
     """2026-07-14T13:23:10 -> Jul 14, 2026, 1:23 PM"""
     parsed = _parse_timestamp(value)
@@ -64,7 +61,6 @@ def humandatetime(value):
     return f"{parsed:%b} {parsed.day}, {parsed.year}, {hour}:{parsed.minute:02d} {meridiem}"
 
 
-@app.template_filter('humandate')
 def humandate(value):
     """2026-07-14T13:23:10 -> Jul 14, 2026"""
     parsed = _parse_timestamp(value)
@@ -78,7 +74,7 @@ SCOPES = [
     'https://www.googleapis.com/auth/drive'
 ]
 
-GOOGLE_SHEET_ID = os.environ.get('GOOGLE_SHEET_ID', '1n1dwcHThv_I19lWkuNhAK5rlscnyMGlM2x-VoR4R8rs')
+GOOGLE_SHEET_ID = os.environ.get('GOOGLE_SHEET_ID', '')
 
 # =============================================================================
 # Naming Convention Mappings (loaded from CSV files)
@@ -105,15 +101,14 @@ def load_csv_mapping(filepath, key_col, value_col):
     return mapping
 
 # Load mappings from CSV files (in mappings/ directory next to app.py)
-MAPPINGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mappings')
+MAPPINGS_DIR = str(Path(__file__).resolve().parents[1] / 'mappings')
 PROJECT_MAP = load_csv_mapping(os.path.join(MAPPINGS_DIR, 'projects.csv'), 'code', 'name')
 PERSON_MAP = load_csv_mapping(os.path.join(MAPPINGS_DIR, 'people.csv'), 'initials', 'name')
+PERSON_NAMES = sorted(load_csv_mapping(os.path.join(MAPPINGS_DIR, 'people.csv'), 'name', 'name').values(), key=str.casefold)
 
 USERNAME_MAP = load_csv_mapping(os.path.join(MAPPINGS_DIR, 'people.csv'), 'zaratan_username', 'name')
 
-print(f"Loaded {len(PROJECT_MAP)} project mappings: {PROJECT_MAP}")
-print(f"Loaded {len(PERSON_MAP)} person mappings: {PERSON_MAP}")
-print(f"Loaded {len(USERNAME_MAP)} zaratan username mappings: {USERNAME_MAP}")
+print(f"Loaded mappings: {len(PROJECT_MAP)} projects, {len(PERSON_MAP)} people, {len(USERNAME_MAP)} usernames")
 
 def parse_scenario_filename(filename):
     """Parse configuration filename to extract metadata.
@@ -184,9 +179,9 @@ def parse_scenario_filename(filename):
     
     return result
 # Google Drive (Shared Drive "GCAM Scenario Tracker Files").
-GOOGLE_DRIVE_FOLDER_ID = os.environ.get('GOOGLE_DRIVE_FOLDER_ID', '1MHMq9vN6QFktXvfo33tG2OpUlcbvblSg')
-DRIVE_CONFIGS_FOLDER_ID = os.environ.get('DRIVE_CONFIGS_FOLDER_ID', '1oXhLFZfEkd-HFKae5Og9c-0ubrFiqAiW')
-DRIVE_INPUTS_FOLDER_ID = os.environ.get('DRIVE_INPUTS_FOLDER_ID', '1Q85c9N6N6YvfeugKzr3MdqxpfK-jhAnw')
+GOOGLE_DRIVE_FOLDER_ID = os.environ.get('GOOGLE_DRIVE_FOLDER_ID', '')
+DRIVE_CONFIGS_FOLDER_ID = os.environ.get('DRIVE_CONFIGS_FOLDER_ID', '')
+DRIVE_INPUTS_FOLDER_ID = os.environ.get('DRIVE_INPUTS_FOLDER_ID', '')
 
 ALLOWED_EXTENSIONS = {'xml'}
 
@@ -226,7 +221,7 @@ def get_google_sheets_client():
             creds_dict = json.loads(creds_json)
             creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
         else:
-            creds = Credentials.from_service_account_file('service-account.json', scopes=SCOPES)
+            creds = Credentials.from_service_account_file(os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', 'service-account.json'), scopes=SCOPES)
     
     return gspread.authorize(creds)
 
@@ -254,7 +249,7 @@ def get_drive_service():
         elif creds_json:
             creds = Credentials.from_service_account_info(json.loads(creds_json), scopes=SCOPES)
         else:
-            creds = Credentials.from_service_account_file('service-account.json', scopes=SCOPES)
+            creds = Credentials.from_service_account_file(os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', 'service-account.json'), scopes=SCOPES)
 
         _drive_service = build('drive', 'v3', credentials=creds, cache_discovery=False)
         return _drive_service
@@ -324,39 +319,58 @@ def get_file_content(file_id):
         return download_file_from_sheet(file_id)
     return download_file_from_drive(file_id)
 
-# Initialize clients
-try:
-    gc = get_google_sheets_client()
-    sheet = gc.open_by_key(GOOGLE_SHEET_ID)
-    scenarios_sheet = sheet.worksheet('Scenarios')
-    inputs_sheet = sheet.worksheet('InputFiles')
-    junction_sheet = sheet.worksheet('ScenarioInputs')
+gc = sheet = scenarios_sheet = inputs_sheet = junction_sheet = None
+file_storage_sheet = zaratan_logs_sheet = saved_filters_sheet = None
+_google_retry_at = 0
+
+
+def initialize_google():
+    """Connect on demand; retry failures without restarting the container."""
+    global gc, sheet, scenarios_sheet, inputs_sheet, junction_sheet
+    global file_storage_sheet, zaratan_logs_sheet, saved_filters_sheet, _google_retry_at
+    if sheets_available():
+        return True
+    if os.environ.get('TRACKER_OFFLINE') == '1' or time.monotonic() < _google_retry_at:
+        return False
+    _google_retry_at = time.monotonic() + 15
+    try:
+        if not GOOGLE_SHEET_ID:
+            raise ValueError('GOOGLE_SHEET_ID is not configured')
+        gc = get_google_sheets_client()
+        sheet = gc.open_by_key(GOOGLE_SHEET_ID)
+        scenarios_sheet = sheet.worksheet('Scenarios')
+        inputs_sheet = sheet.worksheet('InputFiles')
+        junction_sheet = sheet.worksheet('ScenarioInputs')
+        
+        # FileStorage sheet for storing XML content
+        try:
+            file_storage_sheet = sheet.worksheet('FileStorage')
+        except gspread.exceptions.WorksheetNotFound:
+            # Create if doesn't exist
+            file_storage_sheet = sheet.add_worksheet(title='FileStorage', rows=1000, cols=3)
+            file_storage_sheet.append_row(['file_id', 'filename', 'content'])
     
-    # FileStorage sheet for storing XML content
-    try:
-        file_storage_sheet = sheet.worksheet('FileStorage')
-    except:
-        # Create if doesn't exist
-        file_storage_sheet = sheet.add_worksheet(title='FileStorage', rows=1000, cols=3)
-        file_storage_sheet.append_row(['file_id', 'filename', 'content'])
+        # ZaratanLogs sheet for storing raw run logs sent from the cluster
+        try:
+            zaratan_logs_sheet = sheet.worksheet('ZaratanLogs')
+        except gspread.exceptions.WorksheetNotFound:
+            zaratan_logs_sheet = sheet.add_worksheet(title='ZaratanLogs', rows=1000, cols=len(ZARATAN_LOG_COLUMNS))
+            zaratan_logs_sheet.append_row(ZARATAN_LOG_COLUMNS)
 
-    # ZaratanLogs sheet for storing raw run logs sent from the cluster
-    try:
-        zaratan_logs_sheet = sheet.worksheet('ZaratanLogs')
-    except:
-        zaratan_logs_sheet = sheet.add_worksheet(title='ZaratanLogs', rows=1000, cols=len(ZARATAN_LOG_COLUMNS))
-        zaratan_logs_sheet.append_row(ZARATAN_LOG_COLUMNS)
+        try:
+            saved_filters_sheet = sheet.worksheet('SavedFilters')
+        except gspread.exceptions.WorksheetNotFound:
+            saved_filters_sheet = sheet.add_worksheet(title='SavedFilters', rows=1000, cols=6)
+            saved_filters_sheet.append_row(['id', 'tab', 'name', 'saved_by', 'filters_json', 'created_at'])
 
-    print("✓ Google Sheets connection successful")
-except Exception as e:
-    print(f"✗ Error initializing Google APIs: {e}")
-    print("⚠ App will start but Google Sheets features will be unavailable")
-    gc = None
-    scenarios_sheet = None
-    inputs_sheet = None
-    junction_sheet = None
-    file_storage_sheet = None
-    zaratan_logs_sheet = None
+        print("✓ Google Sheets connection successful")
+        return True
+    except Exception:
+        app.logger.exception('Google Sheets initialization failed')
+        gc = sheet = scenarios_sheet = inputs_sheet = junction_sheet = None
+        file_storage_sheet = zaratan_logs_sheet = saved_filters_sheet = None
+        return False
+
 
 # =============================================================================
 # Helper Functions - Google Sheets
@@ -385,40 +399,15 @@ _cache = {'data': None, 'timestamp': 0}
 CACHE_TTL = 60  # seconds - longer cache = fewer API calls
 
 def get_cached_data():
-    """Get all sheet data with caching to reduce API calls"""
-    import time
-    now = time.time()
-    if _cache['data'] and (now - _cache['timestamp']) < CACHE_TTL:
+    """Never replace a good snapshot with partial or failed reads."""
+    now = time.monotonic()
+    if _cache['data'] is not None and now - _cache['timestamp'] < CACHE_TTL:
         return _cache['data']
-    
-    scenarios = []
-    junctions = []
-    inputs = []
-    
-    try:
-        print("Loading scenarios...")
-        scenarios = read_scenario_records()
-        print(f"  Loaded {len(scenarios)} scenarios")
-    except Exception as e:
-        print(f"  ERROR loading scenarios: {e}")
-    
-    try:
-        print("Loading junctions...")
-        junctions = read_junction_records()
-        print(f"  Loaded {len(junctions)} junctions")
-    except Exception as e:
-        print(f"  ERROR loading junctions: {e}")
-    
-    try:
-        print("Loading input files...")
-        inputs = read_input_records()
-        print(f"  Loaded {len(inputs)} input files")
-    except Exception as e:
-        print(f"  ERROR loading inputs: {e}")
-    
-    _cache['data'] = {'scenarios': scenarios, 'junctions': junctions, 'inputs': inputs}
-    _cache['timestamp'] = now
-    return _cache['data']
+    data = {'scenarios': read_scenario_records(),
+            'junctions': read_junction_records(), 'inputs': read_input_records()}
+    _cache.update(data=data, timestamp=now)
+    return data
+
 
 def invalidate_cache():
     """Clear cache after writes"""
@@ -440,7 +429,7 @@ def patch_cached_record(collection, record_id, updates):
     partial cache is worse than no cache.
 
     Safe without locking under the deployed config (gunicorn, one sync worker;
-    see Procfile). Revisit if the app ever runs multi-threaded.
+    see backend/Dockerfile). Revisit if the app ever runs multi-threaded.
     """
     data = _cache.get('data')
     if not data:
@@ -536,74 +525,30 @@ def get_all_input_files():
         return []
 
 def get_scenario_by_id(scenario_id):
-    """Get scenario by ID"""
-    try:
-        records = read_scenario_records()
-        for record in records:
-            if str(record.get('id')) == str(scenario_id):
-                return record
-        return None
-    except Exception as e:
-        print(f"Error getting scenario: {e}")
-        return None
+    return next((dict(s) for s in get_cached_data()['scenarios']
+                 if str(s.get('id')) == str(scenario_id)), None)
+
 
 def get_input_by_id(input_id):
-    """Get input file by ID"""
-    try:
-        records = read_input_records()
-        for record in records:
-            if str(record.get('id')) == str(input_id):
-                return record
-        return None
-    except Exception as e:
-        print(f"Error getting input file: {e}")
-        return None
+    return next((dict(i) for i in get_cached_data()['inputs']
+                 if str(i.get('id')) == str(input_id)), None)
+
 
 def get_input_files_for_scenario(scenario_id):
-    """Get all input files linked to a scenario"""
-    try:
-        junction_records = read_junction_records()
-        input_records = read_input_records()
-        
-        linked_input_ids = [j['input_file_id'] for j in junction_records if str(j['scenario_id']) == str(scenario_id)]
-        
-        result = []
-        for input_rec in input_records:
-            if str(input_rec['id']) in [str(i) for i in linked_input_ids]:
-                # Find component key
-                for j in junction_records:
-                    if str(j['scenario_id']) == str(scenario_id) and str(j['input_file_id']) == str(input_rec['id']):
-                        input_rec['component_key'] = j.get('component_key', '')
-                        break
-                result.append(input_rec)
-        
-        return result
-    except Exception as e:
-        print(f"Error getting input files for scenario: {e}")
-        return []
+    data = get_cached_data()
+    links = {str(j['input_file_id']): j.get('component_key', '')
+             for j in data['junctions'] if str(j['scenario_id']) == str(scenario_id)}
+    return [dict(i, component_key=links[str(i['id'])]) for i in data['inputs']
+            if str(i['id']) in links]
+
 
 def get_scenarios_for_input(input_id):
-    """Get all scenarios using an input file"""
-    try:
-        junction_records = read_junction_records()
-        scenario_records = read_scenario_records()
-        
-        linked_scenario_ids = [j['scenario_id'] for j in junction_records if str(j['input_file_id']) == str(input_id)]
-        
-        result = []
-        for scenario_rec in scenario_records:
-            if str(scenario_rec['id']) in [str(s) for s in linked_scenario_ids]:
-                # Find component key
-                for j in junction_records:
-                    if str(j['input_file_id']) == str(input_id) and str(j['scenario_id']) == str(scenario_rec['id']):
-                        scenario_rec['component_key'] = j.get('component_key', '')
-                        break
-                result.append(scenario_rec)
-        
-        return result
-    except Exception as e:
-        print(f"Error getting scenarios for input: {e}")
-        return []
+    data = get_cached_data()
+    links = {str(j['scenario_id']): j.get('component_key', '')
+             for j in data['junctions'] if str(j['input_file_id']) == str(input_id)}
+    return [dict(s, component_key=links[str(s['id'])]) for s in data['scenarios']
+            if str(s['id']) in links]
+
 
 # =============================================================================
 # Helper Functions - File Storage (in Sheets)
@@ -644,9 +589,9 @@ def download_file_from_sheet(file_id):
 def parse_configuration_xml(xml_content):
     """Parse GCAM configuration XML from string content"""
     try:
-        root = etree.fromstring(xml_content.encode())
+        root = etree.fromstring(xml_content.encode(), parser=etree.XMLParser(resolve_entities=False, no_network=True))
     except:
-        root = etree.fromstring(xml_content)
+        root = etree.fromstring(xml_content, parser=etree.XMLParser(resolve_entities=False, no_network=True))
     
     result = {
         'scenario_name': None,
@@ -703,9 +648,9 @@ def parse_input_file_xml(xml_content):
     """Parse GCAM input file XML from string content"""
     try:
         try:
-            root = etree.fromstring(xml_content.encode())
+            root = etree.fromstring(xml_content.encode(), parser=etree.XMLParser(resolve_entities=False, no_network=True))
         except:
-            root = etree.fromstring(xml_content)
+            root = etree.fromstring(xml_content, parser=etree.XMLParser(resolve_entities=False, no_network=True))
         
         result = {
             'regions': set(),
@@ -752,53 +697,187 @@ def allowed_file(filename):
 # Routes
 # =============================================================================
 
-@app.route('/health')
-def health():
-    """Health check endpoint for Render"""
-    status = {
-        'status': 'ok',
-        'sheets_connected': sheets_available()
-    }
-    return jsonify(status)
+def api_error(message, status=400):
+    return jsonify({'status': 'error', 'message': message}), status
 
-@app.route('/')
-def index():
-    """Main dashboard - loads instantly, data fetched via AJAX"""
-    return render_template('index.html',
-                         scenarios=[],
-                         input_files=[],
-                         projects=[])
 
-@app.route('/api/mappings')
-def api_mappings():
-    """View current project and person mappings"""
-    return jsonify({
-        'projects': PROJECT_MAP,
-        'people': PERSON_MAP,
-        'filename_pattern': 'configuration_PROJECT_scenarioAbbrev_YYMMDD-FL_comment.xml',
-        'example': 'configuration_USAI_HA1_250206-KO_GDPPOPhigh.xml'
-    })
+# Saved views are shared because the tracker has no individual accounts. The
+# saved_by field is a display label only; it does not grant edit permissions.
+SAVED_FILTER_COLUMNS = {
+    'scenarios': {'scenario_name', 'project_name', 'status', 'person',
+                  'submitted', 'input_count', 'personal_scenario_name',
+                  'based_on', 'description', 'errors', 'additional_notes',
+                  'uploaded_by', 'job_id', 'duration', 'component_key',
+                  'finished', 'date_run', 'upload_date', 'zaratan_link'},
+    'inputs': {'file_name', 'folder_location', 'regions_modified',
+               'years_modified', 'sectors_modified', 'scenario_count',
+               'policy_name', 'description', 'additional_notes',
+               'uploaded_by', 'component_key', 'upload_date'},
+}
 
-@app.route('/api/health')
-def api_health():
-    """Diagnostic endpoint - check what's working and what's not"""
-    import time
-    results = {'sheets_available': sheets_available()}
-    
-    if not sheets_available():
-        return jsonify(results)
-    
-    for name, sheet in [('Scenarios', scenarios_sheet), ('InputFiles', inputs_sheet), ('ScenarioInputs', junction_sheet)]:
-        start = time.time()
+
+def validate_saved_filter_state(value, tab):
+    required = {'search', 'project', 'status', 'columns', 'column_visibility'}
+    if not isinstance(value, dict) or set(value) != required:
+        return None
+    if any(not isinstance(value[key], str) or len(value[key]) > 200
+           for key in ('search', 'project', 'status')):
+        return None
+    if tab == 'inputs' and (value['project'] or value['status']):
+        return None
+    columns = value['columns']
+    if not isinstance(columns, list) or len(columns) > len(SAVED_FILTER_COLUMNS[tab]):
+        return None
+    seen = set()
+    for item in columns:
+        if not isinstance(item, dict) or set(item) != {'id', 'value'}:
+            return None
+        key, selected = item['id'], item['value']
+        if not isinstance(key, str) or key not in SAVED_FILTER_COLUMNS[tab] or key in seen:
+            return None
+        seen.add(key)
+        if key in ('project_name', 'person'):
+            if (not isinstance(selected, list) or len(selected) > 100 or
+                    any(not isinstance(v, str) or len(v) > 200 for v in selected)):
+                return None
+        elif not isinstance(selected, str) or len(selected) > 200:
+            return None
+    visibility = value['column_visibility']
+    hideable = SAVED_FILTER_COLUMNS[tab] - ({'scenario_name'} if tab == 'scenarios' else {'file_name'})
+    if (not isinstance(visibility, dict) or len(visibility) > len(hideable) or
+            any(not isinstance(key, str) or key not in hideable or
+                not isinstance(shown, bool) for key, shown in visibility.items())):
+        return None
+    return value
+
+
+def read_saved_filters():
+    rows = saved_filters_sheet.get_all_values()
+    views = []
+    for row in rows[1:]:
+        padded = (row + [''] * 6)[:6]
+        view_id, tab, name, saved_by, state_json, created_at = padded
+        if tab not in SAVED_FILTER_COLUMNS:
+            continue
         try:
-            rows = sheet.get_all_records()
-            elapsed = round(time.time() - start, 2)
-            results[name] = {'status': 'ok', 'rows': len(rows), 'seconds': elapsed}
-        except Exception as e:
-            elapsed = round(time.time() - start, 2)
-            results[name] = {'status': 'error', 'error': str(e), 'seconds': elapsed}
-    
-    return jsonify(results)
+            state = validate_saved_filter_state(json.loads(state_json), tab)
+        except (TypeError, ValueError):
+            state = None
+        if view_id and state is not None:
+            views.append({'id': view_id, 'tab': tab, 'name': name,
+                          'saved_by': saved_by, 'filters': state,
+                          'created_at': created_at})
+    return views
+
+
+@app.get('/api/saved-filters')
+def list_saved_filters():
+    return jsonify({'saved_filters': read_saved_filters()})
+
+
+@app.post('/api/saved-filters')
+def create_saved_filter():
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or set(body) != {'tab', 'name', 'saved_by', 'filters'}:
+        return api_error('Provide a tab, name, saved by label, and filters')
+    tab, name, saved_by = body['tab'], body['name'], body['saved_by']
+    if not isinstance(tab, str) or tab not in SAVED_FILTER_COLUMNS:
+        return api_error('Unknown filter tab')
+    if (not isinstance(name, str) or not 1 <= len(name.strip()) <= 80 or
+            not isinstance(saved_by, str) or len(saved_by.strip()) > 80):
+        return api_error('Name is required (up to 80 characters); saved by is optional (up to 80)')
+    state = validate_saved_filter_state(body['filters'], tab)
+    if state is None:
+        return api_error('Invalid filter settings')
+    name, saved_by = name.strip(), saved_by.strip()
+    if any(view['tab'] == tab and view['name'].casefold() == name.casefold()
+           for view in read_saved_filters()):
+        return api_error('A saved filter with this name already exists for this tab', 409)
+    view = {'id': str(uuid.uuid4()), 'tab': tab, 'name': name,
+            'saved_by': saved_by, 'filters': state,
+            'created_at': datetime.now().astimezone().isoformat(timespec='seconds')}
+    saved_filters_sheet.append_row([view['id'], tab, name, saved_by,
+                                    json.dumps(state, separators=(',', ':')),
+                                    view['created_at']], value_input_option='RAW')
+    return jsonify(view), 201
+
+
+@app.patch('/api/saved-filters/<view_id>')
+def update_saved_filter(view_id):
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or set(body) != {'filters'}:
+        return api_error('Provide filter settings')
+    row = find_row_by_id(saved_filters_sheet, view_id)
+    if not row or row == 1:
+        return api_error('Saved filter not found', 404)
+    values = (saved_filters_sheet.row_values(row) + [''] * 6)[:6]
+    tab = values[1]
+    if tab not in SAVED_FILTER_COLUMNS:
+        return api_error('Saved filter is invalid', 502)
+    state = validate_saved_filter_state(body['filters'], tab)
+    if state is None:
+        return api_error('Invalid filter settings')
+    saved_filters_sheet.update_cell(row, 5, json.dumps(state, separators=(',', ':')))
+    return jsonify({'id': view_id, 'tab': tab, 'name': values[2],
+                    'saved_by': values[3], 'filters': state, 'created_at': values[5]})
+
+
+@app.delete('/api/saved-filters/<view_id>')
+def delete_saved_filter(view_id):
+    row = find_row_by_id(saved_filters_sheet, view_id)
+    if not row or row == 1:
+        return api_error('Saved filter not found', 404)
+    saved_filters_sheet.delete_rows(row)
+    return jsonify({'status': 'success'})
+
+
+@app.before_request
+def prepare_request():
+    # Caddy authenticates users. No CORS permissions are granted to other origins.
+    if request.path.startswith('/api/'):
+        if request.method in ('POST', 'PATCH', 'PUT', 'DELETE'):
+            if request.headers.get('X-Requested-With') != 'GCAM-Tracker':
+                return api_error('Missing request verification header', 403)
+        if request.path.startswith('/api/admin/') and os.environ.get('ENABLE_MAINTENANCE_API') != '1':
+            return api_error('Not found', 404)
+        if request.endpoint and request.endpoint != 'api_mappings' and not initialize_google():
+            return api_error('Google Sheets is unavailable. Check the backend configuration and retry.', 503)
+
+
+@app.errorhandler(HTTPException)
+def http_error(error):
+    return api_error('Upload exceeds the 50 MB request limit' if error.code == 413 else error.description, error.code)
+
+
+@app.errorhandler(Exception)
+def unexpected_error(error):
+    app.logger.exception('Request failed')
+    return api_error('The operation could not be completed. Check the backend logs and retry.', 502)
+
+
+@app.after_request
+def response_headers(response):
+    response.headers['Cache-Control'] = 'no-store'
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    return response
+
+
+@app.get('/health')
+def health():
+    """Liveness only; no credentials or Google calls."""
+    return jsonify({'status': 'ok'})
+
+
+@app.get('/api/health')
+def api_health():
+    get_cached_data()
+    return jsonify({'status': 'ok', 'sheets_connected': True})
+
+
+@app.get('/api/mappings')
+def api_mappings():
+    return jsonify({'projects': PROJECT_MAP, 'people': PERSON_MAP, 'people_names': PERSON_NAMES})
+
 
 @app.route('/api/data')
 def api_data():
@@ -806,6 +885,8 @@ def api_data():
     if not sheets_available():
         return jsonify({'error': 'Sheets unavailable'}), 503
     
+    if request.args.get('refresh') == '1':
+        invalidate_cache()
     cached = get_cached_data()
     if not cached:
         return jsonify({'error': 'Could not load data'}), 500
@@ -861,12 +942,8 @@ def link_config_inputs(scenario_id, input_files, upload_date, uploaded_by='Auto-
     if not input_files:
         return {'linked': 0, 'created': 0}
 
-    existing_files = {}
-    try:
-        for inp in read_input_records():
-            existing_files[inp['file_name']] = inp['id']
-    except Exception as e:
-        print(f"WARN: could not read existing input files: {e}")
+    # A failed read must not be interpreted as an empty registry (duplicate IDs/files).
+    existing_files = {inp['file_name']: inp['id'] for inp in read_input_records()}
 
     new_files_to_add = []
     junctions_to_add = []
@@ -905,330 +982,158 @@ def link_config_inputs(scenario_id, input_files, upload_date, uploaded_by='Auto-
     return {'linked': len(junctions_to_add), 'created': len(new_files_to_add)}
 
 
-@app.route('/upload_config', methods=['POST'])
+def uploaded_xml(field):
+    upload = request.files.get(field)
+    if upload is None or not upload.filename:
+        raise ValueError('Choose an XML file to upload')
+    if not allowed_file(upload.filename):
+        raise ValueError('Only XML files are supported')
+    try:
+        content = upload.read().decode('utf-8-sig')
+        root = etree.fromstring(content.encode('utf-8'),
+                                parser=etree.XMLParser(resolve_entities=False, no_network=True))
+        if root.getroottree().docinfo.doctype:
+            raise ValueError('XML document type declarations are not supported')
+    except (UnicodeDecodeError, etree.XMLSyntaxError) as error:
+        raise ValueError('The file must contain valid UTF-8 XML') from error
+    return secure_filename(upload.filename) or 'configuration.xml', content
+
+
+@app.post('/api/uploads/configuration')
 def upload_config():
-    """Upload and parse configuration XML"""
-    if 'config_file' not in request.files:
-        flash('No file provided', 'error')
-        return redirect(url_for('index'))
-    
-    file = request.files['config_file']
-    uploaded_by = 'Website'  # Fixed - website uploads are always "Website"
-    
-    if file.filename == '':
-        flash('No file selected', 'error')
-        return redirect(url_for('index'))
-    
-    if not allowed_file(file.filename):
-        flash('Only XML files allowed', 'error')
-        return redirect(url_for('index'))
-    
     try:
-        # Read file content
-        filename = secure_filename(file.filename)
-        file_content = file.read().decode('utf-8')
-        
-        file_id = upload_file_to_drive(file_content, filename, DRIVE_CONFIGS_FOLDER_ID)
-        if not file_id:
-            flash('Could not save the configuration to Google Drive. '
-                  'Nothing was stored, please try again.', 'error')
-            return redirect(url_for('index'))
-        
-        # Parse configuration
-        parsed = parse_configuration_xml(file_content)
-        
-        # Parse filename for auto-fill metadata
-        meta = parse_scenario_filename(filename)
-        
-        # Add scenario to sheet with UUID
-        scenario_id = str(uuid.uuid4())[:8]  # Short unique ID (8 chars)
-        upload_date = datetime.now().isoformat()
-        
-        # Auto-fill from filename parsing
-        project_name = meta.get('project_name', '')
-        scenario_abbrev = meta.get('scenario_abbrev', '')
-        date_run = meta.get('date_run', '')
-        comment = meta.get('comment', '')
-        person_name = meta.get('person_name', '')
-        
+        filename, content = uploaded_xml('config_file')
+        parsed = parse_configuration_xml(content)
+    except ValueError as error:
+        return api_error(str(error))
+    file_id = upload_file_to_drive(content, filename, DRIVE_CONFIGS_FOLDER_ID)
+    if not file_id:
+        return api_error('Could not save the configuration to Google Drive. No scenario was created.', 502)
+    meta = parse_scenario_filename(filename)
+    scenario_id = str(uuid.uuid4())[:8]
+    upload_date = datetime.now().isoformat()
+    try:
         scenarios_sheet.append_row([
-            scenario_id,
-            parsed['scenario_name'],
-            scenario_abbrev,  # personal_scenario_name / Other Name
-            project_name,  # project_name
-            date_run,  # date_run
-            comment,  # description (filename comment goes here now)
-            '',  # zaratan_link
-            '',  # additional_notes -> now "Error notes", empty on upload
-            uploaded_by,
-            upload_date,
-            file_id,
-            len(parsed['input_files']),
-            '',  # errors (col 13)
-            '',  # submitted (col 14)
-            '',  # finished (col 15)
-            '',  # job_id (col 16)
-            '',  # duration (col 17)
-            person_name,  # person (col 18)
-            ''   # based_on (col 19)
+            scenario_id, parsed['scenario_name'], meta.get('scenario_abbrev', ''),
+            meta.get('project_name', ''), meta.get('date_run', ''), meta.get('comment', ''),
+            '', '', 'Website', upload_date, file_id, len(parsed['input_files']),
+            '', '', '', '', '', meta.get('person_name', ''), ''
         ])
-        
         link_config_inputs(scenario_id, parsed['input_files'], upload_date)
-        
-        # Build descriptive flash message
-        auto_filled = []
-        if project_name: auto_filled.append(f'Project: {project_name}')
-        if scenario_abbrev: auto_filled.append(f'Abbrev: {scenario_abbrev}')
-        if date_run: auto_filled.append(f'Date: {date_run}')
-        if person_name: auto_filled.append(f'By: {person_name}')
-        if comment: auto_filled.append(f'Description: {comment}')
-        auto_msg = f' | Auto-filled: {", ".join(auto_filled)}' if auto_filled else ''
-        
-        flash(f'Successfully uploaded scenario "{parsed["scenario_name"]}" with {len(parsed["input_files"])} input files{auto_msg}', 'success')
+    except Exception:
+        app.logger.exception('Configuration upload partially failed: %s', scenario_id)
+        return api_error('The upload could not be completed. Some data may have been saved; refresh before retrying.', 502)
+    finally:
         invalidate_cache()
-        
-    except Exception as e:
-        flash(f'Error processing file: {str(e)}', 'error')
-    
-    return redirect(url_for('index'))
+    return jsonify({'status': 'success', 'id': scenario_id,
+                    'message': f'Uploaded {parsed["scenario_name"]} with {len(parsed["input_files"])} input files.'}), 201
 
-@app.route('/upload_input', methods=['POST'])
+
+@app.post('/api/uploads/input')
 def upload_input():
-    """Upload input file XML"""
-    if 'input_file' not in request.files:
-        flash('No file provided', 'error')
-        return redirect(url_for('index'))
-    
-    file = request.files['input_file']
-    uploaded_by = request.form.get('uploaded_by', 'Unknown')
-    
-    if file.filename == '':
-        flash('No file selected', 'error')
-        return redirect(url_for('index'))
-    
-    if not allowed_file(file.filename):
-        flash('Only XML files allowed', 'error')
-        return redirect(url_for('index'))
-    
     try:
-        # Read file content
-        filename = secure_filename(file.filename)
-        file_content = file.read().decode('utf-8')
-        
-        # Parse input file (but don't store the content - just metadata)
-        parsed = parse_input_file_xml(file_content)
-        
-        upload_date = datetime.now().isoformat()
-        
-        # Check if file already exists
-        existing_row = find_row_by_value(inputs_sheet, 'file_name', filename)
-        
-        if existing_row:
-            # Update existing record (no file storage)
-            inputs_sheet.update_cell(existing_row, 3, parsed['regions'])
-            inputs_sheet.update_cell(existing_row, 4, parsed['years'])
-            inputs_sheet.update_cell(existing_row, 5, parsed['sectors'])
-            inputs_sheet.update_cell(existing_row, 10, uploaded_by)
-            inputs_sheet.update_cell(existing_row, 11, upload_date)
-            # Leave file_id empty for input files
-            flash(f'Updated input file metadata "{filename}" (file not stored)', 'success')
+        filename, content = uploaded_xml('input_file')
+    except ValueError as error:
+        return api_error(str(error))
+    parsed = parse_input_file_xml(content)
+    upload_date = datetime.now().isoformat()
+    row = find_row_by_value(inputs_sheet, 'file_name', filename)
+    try:
+        if row:
+            inputs_sheet.batch_update([
+                {'range': f'C{row}:E{row}', 'values': [[parsed['regions'], parsed['years'], parsed['sectors']]]},
+                {'range': f'J{row}:K{row}', 'values': [['Website', upload_date]]}
+            ], value_input_option='RAW')
         else:
-            # Create new record (no file storage)
-            input_id = get_next_id(inputs_sheet)
             inputs_sheet.append_row([
-                input_id,
-                filename,
-                parsed['regions'],
-                parsed['years'],
-                parsed['sectors'],
-                '',  # policy_name
-                '',  # folder_location  
-                '',  # description
-                '',  # additional_notes
-                uploaded_by,
-                upload_date,
-                ''   # file_id (empty - not storing file)
+                get_next_id(inputs_sheet), filename, parsed['regions'], parsed['years'],
+                parsed['sectors'], '', '', '', '', 'Website', upload_date, ''
             ])
-            flash(f'Added input file metadata "{filename}" (file not stored)', 'success')
-        
-    except Exception as e:
-        flash(f'Error processing file: {str(e)}', 'error')
-    
-    return redirect(url_for('index'))
+    finally:
+        invalidate_cache()
+    return jsonify({'status': 'success', 'message': f'{"Updated" if row else "Added"} {filename}. Only input metadata is stored.'}), 200 if row else 201
 
-@app.route('/update_scenario/<scenario_id>', methods=['POST'])
+SCENARIO_COLUMNS = {
+    'personal_scenario_name': 3, 'project_name': 4, 'date_run': 5,
+    'description': 6, 'zaratan_link': 7, 'additional_notes': 8, 'errors': 13,
+    'submitted': 14, 'finished': 15, 'job_id': 16, 'person': 18, 'based_on': 19,
+}
+INPUT_COLUMNS = {'policy_name': 6, 'folder_location': 7, 'description': 8, 'additional_notes': 9}
+
+
+def update_metadata(worksheet, row_id, columns, collection):
+    data = request.get_json()
+    if not isinstance(data, dict) or not data:
+        return api_error('Provide at least one field to update')
+    if set(data) - set(columns) or any(not isinstance(value, str) for value in data.values()):
+        return api_error('Unknown field or invalid value; metadata values must be strings')
+    for field in ('submitted', 'finished', 'date_run'):
+        if data.get(field) and _parse_timestamp(data[field]) is None:
+            return api_error(f'Invalid {field} timestamp')
+    # Direct reads are necessary to resolve the current row number after sheet edits.
+    values = worksheet.col_values(1)
+    row = next((index for index, value in enumerate(values[1:], 2) if str(value) == str(row_id)), None)
+    if row is None:
+        return api_error('Record not found', 404)
+    applied = dict(data)
+    updates = [{'range': gspread.utils.rowcol_to_a1(row, columns[key]), 'values': [[value]]}
+               for key, value in data.items()]
+    if collection == 'scenarios' and ('submitted' in data or 'finished' in data):
+        current = worksheet.row_values(row)
+        submitted = data.get('submitted', current[13] if len(current) > 13 else '')
+        finished = data.get('finished', current[14] if len(current) > 14 else '')
+        applied['duration'] = compute_duration(submitted, finished) if submitted and finished else ''
+        updates.append({'range': gspread.utils.rowcol_to_a1(row, 17), 'values': [[applied['duration']]]})
+    try:
+        worksheet.batch_update(updates, value_input_option='RAW')
+    except Exception:
+        invalidate_cache()
+        raise
+    if patch_cached_record(collection, row_id, applied) is None:
+        invalidate_cache()
+    return jsonify({'status': 'success'})
+
+
+@app.patch('/api/scenarios/<scenario_id>')
 def update_scenario(scenario_id):
-    """Update scenario metadata"""
-    try:
-        row = find_row_by_value(scenarios_sheet, 'id', scenario_id)
-        if not row:
-            return jsonify({'status': 'error', 'message': 'Scenario not found'}), 404
-        
-        data = request.form
+    return update_metadata(scenarios_sheet, scenario_id, SCENARIO_COLUMNS, 'scenarios')
 
-        SCENARIO_COLUMNS = {
-            'personal_scenario_name': 3,
-            'project_name': 4,
-            'date_run': 5,
-            'description': 6,
-            'zaratan_link': 7,
-            'additional_notes': 8,
-            'errors': 13,
-            'submitted': 14,
-            'finished': 15,
-            'job_id': 16,
-            'person': 18,
-            'based_on': 19,
-        }
 
-        applied = {}
-        for field, column in SCENARIO_COLUMNS.items():
-            if field in data:
-                scenarios_sheet.update_cell(row, column, data[field])
-                applied[field] = data[field]
-
-        cached = patch_cached_record('scenarios', scenario_id, applied)
-
-        if 'submitted' in applied or 'finished' in applied:
-            try:
-                if cached is not None:
-                    submitted = str(cached.get('submitted', ''))
-                    finished = str(cached.get('finished', ''))
-                else:
-                    row_data = scenarios_sheet.row_values(row)
-                    submitted = row_data[13] if len(row_data) > 13 else ''
-                    finished = row_data[14] if len(row_data) > 14 else ''
-                if submitted and finished:
-                    duration = compute_duration(submitted, finished)
-                    scenarios_sheet.update_cell(row, 17, duration)
-                    if cached is not None:
-                        cached['duration'] = duration
-            except Exception as e:
-                app.logger.warning('duration recompute failed for %s: %s', scenario_id, e)
-
-        if cached is None:
-            invalidate_cache()
-
-        return jsonify({'status': 'success'})
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-@app.route('/update_input/<int:input_id>', methods=['POST'])
+@app.patch('/api/inputs/<int:input_id>')
 def update_input(input_id):
-    """Update input file metadata"""
-    try:
-        row = find_row_by_id(inputs_sheet, input_id)
-        if not row:
-            return jsonify({'status': 'error', 'message': 'Input file not found'}), 404
-        
-        data = request.form
+    return update_metadata(inputs_sheet, input_id, INPUT_COLUMNS, 'inputs')
 
-        INPUT_COLUMNS = {
-            'policy_name': 6,
-            'folder_location': 7,
-            'description': 8,
-            'additional_notes': 9,
-        }
 
-        applied = {}
-        for field, column in INPUT_COLUMNS.items():
-            if field in data:
-                inputs_sheet.update_cell(row, column, data[field])
-                applied[field] = data[field]
-
-        if patch_cached_record('inputs', input_id, applied) is None:
-            invalidate_cache()
-
-        return jsonify({'status': 'success'})
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-@app.route('/scenario/<scenario_id>')
+@app.get('/api/scenarios/<scenario_id>')
 def scenario_detail(scenario_id):
-    """View scenario details"""
     scenario = get_scenario_by_id(scenario_id)
-    
     if not scenario:
-        flash('Scenario not found', 'error')
-        return redirect(url_for('index'))
-    
-    input_files = get_input_files_for_scenario(scenario_id)
-    
-    return render_template('scenario_detail.html', scenario=scenario, input_files=input_files)
+        return api_error('Scenario not found', 404)
+    return jsonify({'scenario': scenario, 'input_files': get_input_files_for_scenario(scenario_id)})
 
-@app.route('/input/<int:input_id>')
+
+@app.get('/api/inputs/<int:input_id>')
 def input_detail(input_id):
-    """View input file details"""
     input_file = get_input_by_id(input_id)
-    
     if not input_file:
-        flash('Input file not found', 'error')
-        return redirect(url_for('index'))
-    
-    scenarios = get_scenarios_for_input(input_id)
-    
-    return render_template('input_detail.html', input_file=input_file, scenarios=scenarios)
+        return api_error('Input file not found', 404)
+    return jsonify({'input_file': input_file, 'scenarios': get_scenarios_for_input(input_id)})
 
-@app.route('/compare/<int:id1>/<int:id2>')
-def compare_inputs(id1, id2):
-    """Compare two input files"""
-    file1 = get_input_by_id(id1)
-    file2 = get_input_by_id(id2)
-    
-    if not file1 or not file2:
-        flash('One or both files not found', 'error')
-        return redirect(url_for('index'))
-    
-    # Note: Input files are not stored, only metadata
-    # Comparison not available for input files
-    diff_html = None
-    
-    return render_template('compare.html', 
-                         file1=file1, 
-                         file2=file2, 
-                         diff_html=diff_html,
-                         message="Input file contents are not stored. Only metadata is tracked.")
 
-@app.route('/download/<path:file_type>/<file_id>')
-def download_file(file_type, file_id):
-    """Download a file from Google Sheets"""
-    try:
-        if file_type == 'config':
-            scenario = get_scenario_by_id(file_id)
-            if not scenario or not scenario.get('config_file_id'):
-                flash('File not found', 'error')
-                return redirect(url_for('index'))
-            
-            sheet_file_id = scenario['config_file_id']
-            filename = f"{scenario['scenario_name']}.xml"
-            
-           
-            content = get_file_content(sheet_file_id)
-            
-            if not content:
-                flash('Error downloading file', 'error')
-                return redirect(url_for('index'))
-            
-            # Return file
-            return Response(
-                content,
-                mimetype='application/xml',
-                headers={'Content-Disposition': f'attachment;filename={filename}'}
-            )
-        
-        elif file_type == 'input':
-            # Input files are not stored
-            flash('Input files are not stored. Only metadata is tracked.', 'info')
-            return redirect(url_for('index'))
-        else:
-            flash('Invalid file type', 'error')
-            return redirect(url_for('index'))
-        
-    except Exception as e:
-        flash(f'Error: {str(e)}', 'error')
-        return redirect(url_for('index'))
+@app.get('/api/scenarios/<scenario_id>/configuration')
+def download_file(scenario_id):
+    scenario = get_scenario_by_id(scenario_id)
+    if not scenario or not scenario.get('config_file_id'):
+        return api_error('Configuration file not found', 404)
+    content = get_file_content(scenario['config_file_id'])
+    if content is None:
+        return api_error('Could not download the configuration from storage', 502)
+    filename = secure_filename(str(scenario.get('scenario_name') or scenario_id)) + '.xml'
+    return send_file(io.BytesIO(content.encode('utf-8')), mimetype='application/xml',
+                     as_attachment=True, download_name=filename)
 
-@app.route('/migrate_folder_locations')
+
+@app.post('/api/admin/migrate_folder_locations')
 def migrate_folder_locations():
     """One-time migration to populate folder_location for existing input files"""
     if not sheets_available():
@@ -1295,12 +1200,7 @@ def migrate_folder_locations():
         print(f"Migration error: {error_details}")
         return jsonify({'error': str(e), 'details': error_details}), 500
 
-@app.route('/test_compare')
-def test_compare():
-    """Test endpoint to verify routing works"""
-    return jsonify({'status': 'ok', 'message': 'Comparison routing is working!'})
-
-@app.route('/cleanup_orphaned_junctions')
+@app.post('/api/admin/cleanup_orphaned_junctions')
 def cleanup_orphaned_junctions():
     """Sweep out ALL orphaned data: junctions pointing to deleted scenarios,
     and input files no longer referenced by any surviving scenario.
@@ -1382,7 +1282,7 @@ def cleanup_orphaned_junctions():
         print(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
-@app.route('/add_zaratan_columns')
+@app.post('/api/admin/add_zaratan_columns')
 def add_zaratan_columns():
     """One-time migration to add new Zaratan columns to Scenarios sheet"""
     if not sheets_available():
@@ -1401,22 +1301,20 @@ def add_zaratan_columns():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/compare_scenarios', strict_slashes=False)
+@app.get('/api/comparisons/export')
 def compare_scenarios():
     """Compare multiple scenarios and generate a report"""
     try:
         print("DEBUG: Compare scenarios route called")
         print(f"DEBUG: Request args: {request.args}")
-        scenario_ids = request.args.get('ids', '').split(',')
+        scenario_ids = list(dict.fromkeys(i.strip() for i in request.args.get('ids', '').split(',') if i.strip()))
         print(f"DEBUG: Scenario IDs: {scenario_ids}")
         
         if len(scenario_ids) < 2:
-            flash('Please select at least 2 scenarios to compare', 'error')
-            return redirect(url_for('index'))
+            return api_error('Select at least two distinct scenarios')
         
         if not sheets_available():
-            flash('Google Sheets connection unavailable', 'error')
-            return redirect(url_for('index'))
+            return api_error('Google Sheets connection unavailable', 503)
         
         # Get all scenarios
         scenarios = []
@@ -1432,135 +1330,11 @@ def compare_scenarios():
             else:
                 print(f"DEBUG: Scenario {scenario_id} not found")
         
-        if len(scenarios) < 2:
-            flash('Could not find all selected scenarios', 'error')
-            return redirect(url_for('index'))
+        if len(scenarios) != len(scenario_ids):
+            return api_error('One or more selected scenarios were not found', 404)
         
-        # Generate comparison report
-        report_lines = []
-        report_lines.append("=" * 80)
-        report_lines.append("GCAM SCENARIO COMPARISON REPORT")
-        report_lines.append("=" * 80)
-        report_lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        report_lines.append(f"Number of scenarios compared: {len(scenarios)}")
-        report_lines.append("")
-        
-        # Section 1: Scenario Overview
-        report_lines.append("-" * 80)
-        report_lines.append("SCENARIO OVERVIEW")
-        report_lines.append("-" * 80)
-        for i, scenario in enumerate(scenarios, 1):
-            report_lines.append(f"\n{i}. {scenario['scenario_name']}")
-            report_lines.append(f"   ID: {scenario['id']}")
-            if scenario.get('project_name'):
-                report_lines.append(f"   Project: {scenario['project_name']}")
-            if scenario.get('date_run'):
-                report_lines.append(f"   Date Run: {scenario['date_run']}")
-            report_lines.append(f"   Number of Input Files: {len(scenario['input_file_names'])}")
-            if scenario.get('description'):
-                report_lines.append(f"   Description: {scenario['description']}")
-        
-        report_lines.append("")
-        
-        # Section 2: Input Files Comparison - UNIQUE FILES FIRST
-        report_lines.append("-" * 80)
-        report_lines.append("INPUT FILES COMPARISON")
-        report_lines.append("-" * 80)
-        
-        # Get all unique files across all scenarios
-        all_files = set()
-        for scenario in scenarios:
-            all_files.update(scenario['input_file_names'])
-        
-        # Files shared by ALL scenarios
         shared_files = set.intersection(*[s['input_file_names'] for s in scenarios])
-        
-        report_lines.append(f"\nTotal unique input files across all scenarios: {len(all_files)}")
-        report_lines.append(f"Files shared by ALL scenarios: {len(shared_files)}")
-        
-        # UNIQUE FILES FIRST (moved up)
-        report_lines.append("\n" + "-" * 80)
-        report_lines.append("UNIQUE FILES PER SCENARIO")
-        report_lines.append("-" * 80)
-        
-        for scenario in scenarios:
-            unique_files = scenario['input_file_names'] - shared_files
-            other_files = set()
-            for other in scenarios:
-                if other['id'] != scenario['id']:
-                    other_files.update(other['input_file_names'])
-            
-            truly_unique = scenario['input_file_names'] - other_files
-            
-            report_lines.append(f"\n{scenario['scenario_name']}:")
-            report_lines.append(f"  Files NOT in common set: {len(unique_files)}")
-            report_lines.append(f"  Files ONLY in this scenario: {len(truly_unique)}")
-            
-            if truly_unique:
-                report_lines.append("  Unique files:")
-                for file in sorted(truly_unique):
-                    report_lines.append(f"    - {file}")
-        
-        # SHARED FILES AFTER (moved down)
-        report_lines.append("\n" + "-" * 80)
-        report_lines.append("SHARED FILES")
-        report_lines.append("-" * 80)
-        
-        if shared_files:
-            report_lines.append(f"\nFiles present in ALL {len(scenarios)} scenarios ({len(shared_files)} total):")
-            for file in sorted(shared_files):
-                report_lines.append(f"  - {file}")
-        else:
-            report_lines.append("\nNo files are shared by all scenarios.")
-        
-        # Section 3: File-by-File Matrix
-        report_lines.append("\n" + "-" * 80)
-        report_lines.append("FILE PRESENCE MATRIX")
-        report_lines.append("-" * 80)
-        report_lines.append("\nLegend: ✓ = Present, ✗ = Absent\n")
-        
-        # Create header
-        header = "File Name".ljust(50)
-        for i, scenario in enumerate(scenarios, 1):
-            header += f"  S{i}"
-        report_lines.append(header)
-        report_lines.append("-" * len(header))
-        
-        # Add each file
-        for file in sorted(all_files):
-            line = file[:48].ljust(50)
-            for scenario in scenarios:
-                if file in scenario['input_file_names']:
-                    line += "  ✓ "
-                else:
-                    line += "  ✗ "
-            report_lines.append(line)
-        
-        # Section 4: Summary Statistics
-        report_lines.append("\n" + "-" * 80)
-        report_lines.append("SUMMARY STATISTICS")
-        report_lines.append("-" * 80)
-        
-        for i, scenario in enumerate(scenarios, 1):
-            overlap_counts = []
-            for j, other in enumerate(scenarios, 1):
-                if i != j:
-                    overlap = len(scenario['input_file_names'] & other['input_file_names'])
-                    total = len(scenario['input_file_names'] | other['input_file_names'])
-                    if total > 0:
-                        percentage = (overlap / total) * 100
-                        overlap_counts.append(f"S{j}: {percentage:.1f}%")
-            
-            report_lines.append(f"\nS{i} ({scenario['scenario_name']}) overlap with others:")
-            report_lines.append(f"  {', '.join(overlap_counts)}")
-        
-        report_lines.append("\n" + "=" * 80)
-        report_lines.append("END OF REPORT")
-        report_lines.append("=" * 80)
-        
-        # =====================================================================
-        # Generate XLSX comparison spreadsheet (2 sheets)
-        # =====================================================================
+
         import io
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -1579,13 +1353,15 @@ def compare_scenarios():
         except:
             pass
         
-        scenario_names_list = [s['scenario_name'] for s in scenarios]
+        scenario_names_list = [f"{s['scenario_name']} ({s['id']})" for s in scenarios]
+        scenario_labels = {str(s['id']): name for s, name in zip(scenarios, scenario_names_list)}
+        scenario_keys = [str(s['id']) for s in scenarios]
         
         for scenario in scenarios:
             for file_name in scenario['input_file_names']:
                 if file_name not in file_scenario_map:
                     file_scenario_map[file_name] = set()
-                file_scenario_map[file_name].add(scenario['scenario_name'])
+                file_scenario_map[file_name].add(str(scenario['id']))
         
         all_files_sorted = sorted(file_scenario_map.keys())
         total_scenarios = len(scenarios)
@@ -1622,11 +1398,11 @@ def compare_scenarios():
                 folder = file_folder_map.get(file_name, '')
                 
                 if len(present_in) == 1:
-                    status = f"Unique to {list(present_in)[0]}"
+                    status = f"Unique to {scenario_labels[next(iter(present_in))]}"
                     present_str = ''  # Leave empty for unique files
                 else:
                     status = f"In {len(present_in)} of {total_scenarios} scenarios"
-                    present_str = "; ".join(sorted(present_in))
+                    present_str = "; ".join(scenario_labels[key] for key in sorted(present_in))
                 
                 ws1.cell(row=current_row, column=1, value=file_name).border = border
                 ws1.cell(row=current_row, column=2, value=folder).border = border
@@ -1675,7 +1451,7 @@ def compare_scenarios():
             ws2.cell(row=row_idx, column=1, value=file_name).border = border
             ws2.cell(row=row_idx, column=2, value=folder).border = border
             
-            for sc_idx, sc_name in enumerate(scenario_names_list, 3):
+            for sc_idx, sc_name in enumerate(scenario_keys, 3):
                 is_present = sc_name in present_in
                 cell = ws2.cell(row=row_idx, column=sc_idx, value=1 if is_present else 0)
                 cell.alignment = center_align
@@ -1684,7 +1460,7 @@ def compare_scenarios():
         # Summary row
         summary_row = len(all_files_sorted) + 3
         ws2.cell(row=summary_row, column=1, value="TOTAL FILES").font = Font(bold=True)
-        for sc_idx, sc_name in enumerate(scenario_names_list, 3):
+        for sc_idx, sc_name in enumerate(scenario_keys, 3):
             count = sum(1 for f in all_files_sorted if sc_name in file_scenario_map.get(f, set()))
             cell = ws2.cell(row=summary_row, column=sc_idx, value=count)
             cell.font = Font(bold=True)
@@ -1699,6 +1475,11 @@ def compare_scenarios():
         
         # Save
         xlsx_buffer = io.BytesIO()
+        for worksheet in wb:
+            for row in worksheet:
+                for cell in row:
+                    if cell.data_type == 'f':
+                        cell.data_type = 's'
         wb.save(xlsx_buffer)
         xlsx_buffer.seek(0)
         
@@ -1713,10 +1494,23 @@ def compare_scenarios():
     except Exception as e:
         import traceback
         print(f"Comparison error: {traceback.format_exc()}")
-        flash(f'Error comparing scenarios: {str(e)}', 'error')
-        return redirect(url_for('index'))
+        return api_error('Could not generate the comparison report', 502)
 
-@app.route('/delete_scenario/<scenario_id>', methods=['POST'])
+
+@app.get('/api/comparisons')
+def comparison_data():
+    ids = list(dict.fromkeys(value.strip() for value in request.args.get('ids', '').split(',') if value.strip()))
+    if len(ids) < 2:
+        return api_error('Select at least two distinct scenarios')
+    records = []
+    for scenario_id in ids:
+        scenario = get_scenario_by_id(scenario_id)
+        if scenario is None:
+            return api_error('One or more selected scenarios were not found', 404)
+        records.append({'scenario': scenario, 'input_files': get_input_files_for_scenario(scenario_id)})
+    return jsonify({'scenarios': records})
+
+@app.delete('/api/scenarios/<scenario_id>')
 def delete_scenario(scenario_id):
     """Delete a scenario, its junctions, and any input files left orphaned.
     
@@ -1726,11 +1520,11 @@ def delete_scenario(scenario_id):
     """
     try:
         if not sheets_available():
-            return jsonify({'success': False, 'error': 'Sheets unavailable'})
+            return api_error('Sheets unavailable', 503)
         
         scenario_row = find_row_by_value(scenarios_sheet, 'id', scenario_id)
         if not scenario_row:
-            return jsonify({'success': False, 'error': 'Scenario not found'})
+            return api_error('Scenario not found', 404)
         
         sid = str(scenario_id).strip()
         
@@ -1814,7 +1608,7 @@ def delete_scenario(scenario_id):
         import traceback
         print(f"Error deleting scenario: {traceback.format_exc()}")
         invalidate_cache()
-        return jsonify({'success': False, 'error': str(e)})
+        return api_error('Deletion could not be completed; refresh before retrying', 502)
 
 # =============================================================================
 # Zaratan Log Ingestion
@@ -2269,11 +2063,13 @@ def ingest_logs():
     {...}} on success; the sender can safely delete all files in the batch after
     any 200 response.
     """
-    # Auth (only enforced if a token is configured)
-    if INGEST_TOKEN:
-        provided = request.headers.get('X-Ingest-Token') or request.args.get('token', '')
-        if provided != INGEST_TOKEN:
-            return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
+    if not INGEST_TOKEN:
+        return api_error('Log ingestion is not configured', 503)
+    provided = request.headers.get('X-Ingest-Token', '')
+    if not hmac.compare_digest(provided.encode('utf-8'), INGEST_TOKEN.encode('utf-8')):
+        return api_error('Unauthorized', 401)
+    if not initialize_google():
+        return api_error('Sheets unavailable', 503)
 
     if zaratan_logs_sheet is None:
         return jsonify({'status': 'error', 'message': 'Sheets unavailable'}), 503
@@ -2283,6 +2079,8 @@ def ingest_logs():
         return jsonify({'status': 'error', 'message': 'Invalid or missing JSON body'}), 400
 
     records = payload if isinstance(payload, list) else [payload]
+    if any(not isinstance(record, dict) for record in records):
+        return api_error('Send a JSON object or an array of objects')
     if not records:
         return jsonify({'status': 'ok', 'received': 0, 'skipped': 0})
 
@@ -2336,4 +2134,4 @@ def ingest_logs():
 # =============================================================================
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(host='127.0.0.1', port=8000)
