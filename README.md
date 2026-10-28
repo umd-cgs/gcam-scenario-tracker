@@ -21,6 +21,10 @@ backend's port is not published. Google credentials are mounted only into the ba
   table-column filters, and selected columns for either Scenarios or Input files. The optional “saved by” name
   is a display label; without individual accounts, anyone with tracker access can apply,
   update, or delete any saved view.
+- **Scenario reruns:** Runs with the same scenario name and assigned person remain separate
+  records in `Scenarios`. The dashboard shows the newest run, marks it as updated, and
+  links to older runs from the scenario detail page. Runs without an assigned person
+  stay separate. Run date determines the day; upload time resolves same-day reruns.
 - **Deploy:** Docker Compose; images can be transferred as a compressed archive without a registry.
 
 **[Full Lightsail deployment instructions →](deploy/README.md)**
@@ -62,9 +66,11 @@ Prerequisite: Docker Engine/Desktop with Compose v2, using Linux containers.
 docker compose --env-file /dev/null -f compose.local.yaml up --build -d
 ```
 
-Open **http://localhost:8080**. This offline preview deliberately displays an
-actionable Google connection error rather than fabricated research data. It does
-not load your existing `.env`, authenticate users, or contact Google. Published
+Open **http://localhost:8080**. This offline preview shows read-only sample data:
+three runs of **Demo Baseline 2050** by **Demo Runner** appear as one Updated row.
+Open that row and select **View 3 runs** to inspect older results. A run with the
+same name by another person remains a separate row. The preview does not load
+your existing `.env`, authenticate users, or contact Google. Published
 ports bind only to `127.0.0.1`. On Windows, run these commands in WSL/Git Bash, or
 substitute a separate empty file for `/dev/null` in PowerShell.
 

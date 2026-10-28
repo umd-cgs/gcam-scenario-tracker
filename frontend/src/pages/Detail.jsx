@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { ArrowLeft, Download, ExternalLink, Pencil } from "lucide-react";
+import { ArrowLeft, Download, ExternalLink, History, Pencil } from "lucide-react";
 import { request } from "../api.js";
 import { formatDate, safeUrl } from "../lib.js";
-import { Loading, ErrorState } from "../components/Feedback.jsx";
+import { Loading, ErrorState, Modal } from "../components/Feedback.jsx";
 import {
   InputTable,
   ScenarioTable,
@@ -43,12 +43,15 @@ export default function Detail({
   onEdit,
   onDownload,
   onDelete,
+  readOnly,
 }) {
   const { id } = useParams();
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
   const [retry, setRetry] = useState(0);
+  const [showHistory, setShowHistory] = useState(false);
   useEffect(() => {
+    setShowHistory(false);
     const controller = new AbortController();
     setResult(null);
     setError("");
@@ -77,6 +80,7 @@ export default function Detail({
   const details = result.data;
   const record = details.scenario || details.input_file;
   const fields = kind === "scenario" ? scenarioFields : inputFields;
+  const history = details.run_history || [];
   return (
     <>
       <Link className="back-link" to={kind === "scenario" ? "/" : "/inputs"}>
@@ -91,15 +95,26 @@ export default function Detail({
           </div>
           <h1>{record.scenario_name || record.file_name}</h1>
           {kind === "scenario" && <StatusBadge scenario={record} />}
+          {kind === "scenario" && record.run_count > 1 && (
+            <span className="updated-badge">
+              {record.is_latest_run ? "Updated run" : "Older run"}
+            </span>
+          )}
         </div>
         <div className="inline-actions">
-          <button
+          {kind === "scenario" && history.length > 1 && (
+            <button className="button secondary" onClick={() => setShowHistory(true)}>
+              <History size={16} />
+              View {history.length} runs
+            </button>
+          )}
+          {onEdit && <button
             className="button secondary"
             onClick={() => onEdit(record, kind)}
           >
             <Pencil size={16} />
             Edit metadata
-          </button>
+          </button>}
           {kind === "scenario" && record.config_file_id && (
             <button
               className="button primary"
@@ -111,6 +126,12 @@ export default function Detail({
           )}
         </div>
       </header>
+      {readOnly && <p className="demo-notice">Demo preview · Sample data only.</p>}
+      {kind === "scenario" && record.is_latest_run === false && (
+        <div className="history-notice">
+          This is an older run. <Link to={`/scenarios/${encodeURIComponent(record.latest_run_id)}`}>View the latest run</Link>.
+        </div>
+      )}
       <section className="detail-card">
         <h2>Overview</h2>
         <dl className="detail-grid">
@@ -174,7 +195,7 @@ export default function Detail({
           compact
         />
       )}
-      {kind === "scenario" && (
+      {kind === "scenario" && onDelete && (
         <div className="danger-zone">
           <span>Remove this scenario and its unshared input metadata.</span>
           <button
@@ -184,6 +205,28 @@ export default function Detail({
             Delete scenario
           </button>
         </div>
+      )}
+      {showHistory && (
+        <Modal title="Run history" onClose={() => setShowHistory(false)} wide>
+          <p className="modal-intro">{record.scenario_name} · {record.person}</p>
+          <ol className="run-history-list">
+            {history.map((run) => (
+              <li key={run.id}>
+                <div>
+                  <strong>{run.is_latest_run ? "Latest run" : "Older run"}</strong>
+                  <span>{formatDate(run.submitted || run.date_run || run.upload_date, Boolean(run.submitted || (!run.date_run && run.upload_date)))} · {run.job_id ? `Job ${run.job_id}` : `ID ${run.id}`}</span>
+                </div>
+                {String(run.id) === String(record.id) ? (
+                  <span className="muted">Viewing</span>
+                ) : (
+                  <Link to={`/scenarios/${encodeURIComponent(run.id)}`} onClick={() => setShowHistory(false)}>
+                    View details
+                  </Link>
+                )}
+              </li>
+            ))}
+          </ol>
+        </Modal>
       )}
     </>
   );

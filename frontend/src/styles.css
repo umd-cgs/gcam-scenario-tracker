@@ -699,6 +699,26 @@ tbody tr:hover {
   padding: 3px 8px;
   border-radius: 5px;
 }
+.updated-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 3px 7px;
+  border-radius: 4px;
+  background: var(--info-bg);
+  color: var(--info-text);
+  font-size: 10px;
+  font-weight: 600;
+  vertical-align: middle;
+}
+.demo-notice {
+  padding: 11px 14px;
+  margin: 0 0 18px;
+  border: 1px solid var(--info-text);
+  border-radius: 8px;
+  background: var(--info-bg);
+  color: var(--info-text);
+  font-size: 12px;
+}
 .status-badge {
   display: inline-flex;
   align-items: center;
@@ -959,6 +979,37 @@ tbody tr:hover {
   background: var(--surface);
   border-radius: 10px;
   margin-bottom: 28px;
+}
+.history-notice {
+  margin-bottom: 18px;
+  padding: 12px 15px;
+  border: 1px solid var(--info-text);
+  border-radius: 8px;
+  background: var(--info-bg);
+  font-size: 12px;
+}
+.run-history-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.run-history-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 0;
+  border-top: 1px solid var(--line);
+}
+.run-history-list li div {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.run-history-list li span {
+  color: var(--muted);
+  overflow-wrap: anywhere;
 }
 .detail-card h2 {
   margin-bottom: 25px;

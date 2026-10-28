@@ -52,6 +52,11 @@ export function ScenarioTable({
           >
             {row.scenario_name}
           </Link>
+          {row.run_count > 1 && (
+            <span className="updated-badge" title={`${row.run_count} stored runs`}>
+              {row.is_latest_run === false ? "Older run" : "Updated"}
+            </span>
+          )}
           <span className="record-subtitle">
             {row.personal_scenario_name || `ID ${row.id}`}
           </span>
