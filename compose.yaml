@@ -1,0 +1,66 @@
+name: gcam-tracker
+
+services:
+  backend:
+    image: ${BACKEND_IMAGE:-gcam-tracker-backend:1.0.0}
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 190s
+    environment:
+      GOOGLE_SHEET_ID: ${GOOGLE_SHEET_ID:?Set GOOGLE_SHEET_ID in .env}
+      GOOGLE_DRIVE_FOLDER_ID: ${GOOGLE_DRIVE_FOLDER_ID:-}
+      DRIVE_CONFIGS_FOLDER_ID: ${DRIVE_CONFIGS_FOLDER_ID:?Set DRIVE_CONFIGS_FOLDER_ID in .env}
+      DRIVE_INPUTS_FOLDER_ID: ${DRIVE_INPUTS_FOLDER_ID:-}
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/google-service-account.json
+      INGEST_TOKEN: ${INGEST_TOKEN:?Set a random INGEST_TOKEN in .env}
+      ENABLE_MAINTENANCE_API: "0"
+    secrets:
+      - source: google_credentials
+        target: google-service-account.json
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks: [tracker]
+
+  frontend:
+    image: ${FRONTEND_IMAGE:-gcam-tracker-frontend:1.0.0}
+    restart: unless-stopped
+    init: true
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:?Set the hostname in .env}
+      BASIC_AUTH_USER: ${BASIC_AUTH_USER:?Set a website username in .env}
+      BASIC_AUTH_HASH: ${BASIC_AUTH_HASH:?Set a Caddy password hash in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      backend:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks: [tracker]
+
+secrets:
+  google_credentials:
+    file: ./secrets/google-service-account.json
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  tracker:
