@@ -21,7 +21,6 @@ export default function Dashboard({
   reload,
   updatedAt,
   onUpload,
-  readOnly,
   onEdit,
   onDelete,
   onDownload,
@@ -183,9 +182,6 @@ export default function Dashboard({
           </div>
         ))}
       </section>
-      {readOnly && (
-        <p className="demo-notice">Demo preview · Sample data only. The three Demo Baseline 2050 runs are stored separately; open the Updated row to view their history.</p>
-      )}
       <section className="workspace-section">
         <div className="filter-bar">
           <label className="search-field">
@@ -242,7 +238,7 @@ export default function Dashboard({
             </button>
           )}
         </div>
-        {!readOnly && <div className="saved-filter-bar">
+        <div className="saved-filter-bar">
           <label>
             Saved filters
             <select
@@ -284,8 +280,8 @@ export default function Dashboard({
             )
           )}
           {selectedSaved && isModified && <span className="field-hint">Unsaved changes</span>}
-        </div>}
-        {!readOnly && showSaveForm && (
+        </div>
+        {showSaveForm && (
           <form className="saved-filter-form" onSubmit={saveFilter}>
             <label>
               Filter name

@@ -1,4 +1,4 @@
-# Standalone local preview. Does not load the production .env or contact Google.
+# Local setup for testing with a Google test Sheet and Drive folder.
 name: gcam-tracker-local
 services:
   backend:
@@ -6,8 +6,6 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    environment:
-      TRACKER_OFFLINE: "1"
     ports:
       - "127.0.0.1:8000:8000"
   frontend:

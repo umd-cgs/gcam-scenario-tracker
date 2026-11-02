@@ -710,15 +710,6 @@ tbody tr:hover {
   font-weight: 600;
   vertical-align: middle;
 }
-.demo-notice {
-  padding: 11px 14px;
-  margin: 0 0 18px;
-  border: 1px solid var(--info-text);
-  border-radius: 8px;
-  background: var(--info-bg);
-  color: var(--info-text);
-  font-size: 12px;
-}
 .status-badge {
   display: inline-flex;
   align-items: center;

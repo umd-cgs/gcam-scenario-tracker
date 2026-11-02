@@ -39,8 +39,8 @@ backend's port is not published. Google credentials are mounted only into the ba
 | `frontend/Caddyfile` | Production authentication, routing, HTTPS |
 | `frontend/Dockerfile` | React build followed by a small Caddy runtime |
 | `compose.yaml` | Image-only production deployment |
-| `compose.local.yaml` | Local, offline container preview |
-| `compose.google.yaml` | Optional local overlay for testing with Google credentials |
+| `compose.local.yaml` | Local container setup |
+| `compose.google.yaml` | Local overlay for testing with Google credentials |
 | `.env.example` | Deployment settings, with no real credentials |
 | `scripts/build-images.sh` | Build and export both images |
 | `migrate_configs_to_drive.py` | Optional migration of older Sheet-backed configurations to Drive |
@@ -58,31 +58,9 @@ Each archive includes restoration instructions and preserves uncommitted changes
 The earlier image export was also archived because it predates the current UI;
 run `bash scripts/build-images.sh 1.0.0` to create a fresh deployment bundle.
 
-## Local container preview — no Google credentials needed
+## Test locally with Docker
 
 Prerequisite: Docker Engine/Desktop with Compose v2, using Linux containers.
-
-```bash
-docker compose --env-file /dev/null -f compose.local.yaml up --build -d
-```
-
-Open **http://localhost:8080**. This offline preview shows read-only sample data:
-three runs of **Demo Baseline 2050** by **Demo Runner** appear as one Updated row.
-Open that row and select **View 3 runs** to inspect older results. A run with the
-same name by another person remains a separate row. The preview does not load
-your existing `.env`, authenticate users, or contact Google. Published
-ports bind only to `127.0.0.1`. On Windows, run these commands in WSL/Git Bash, or
-substitute a separate empty file for `/dev/null` in PowerShell.
-
-```bash
-docker compose --env-file /dev/null -f compose.local.yaml logs -f
-docker compose --env-file /dev/null -f compose.local.yaml down
-```
-
-This local configuration is **not** the production deployment. Use `compose.yaml`
-and [the guide](deploy/README.md) for team authentication and HTTPS.
-
-### Test real functionality locally with Docker
 
 Keep your existing `.env`; do not overwrite it with `.env.example`. Set
 `GOOGLE_SHEET_ID` and `DRIVE_CONFIGS_FOLDER_ID` to a **test copy** of your Sheet and

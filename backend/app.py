@@ -8,7 +8,7 @@ import os
 import json
 import difflib
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from flask import Flask, request, jsonify, Response, send_file
 from werkzeug.exceptions import HTTPException
@@ -524,9 +524,58 @@ def get_all_input_files():
         print(f"Error getting input files: {e}")
         return []
 
+
+def _run_time(value):
+    parsed = _parse_timestamp(value)
+    if parsed is None:
+        return float('-inf')
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def scenario_run_groups(scenarios):
+    """Group named owners' runs without changing the stored scenario records.
+
+    Run date determines the day; creation time resolves same-day reruns. Sheet
+    order is the final tie breaker for older records with incomplete dates.
+    """
+    groups = {}
+    for index, scenario in enumerate(scenarios):
+        name = str(scenario.get('scenario_name') or '').strip().casefold()
+        person = str(scenario.get('person') or '').strip().casefold()
+        key = ('owner', name, person) if name and person else ('unassigned', str(scenario.get('id')), '')
+        groups.setdefault(key, []).append((index, scenario))
+    return [
+        [row for _, row in sorted(group, key=lambda item: (
+            _run_time(item[1].get('date_run') or item[1].get('submitted') or item[1].get('upload_date')),
+            _run_time(item[1].get('upload_date')),
+            _run_time(item[1].get('submitted')),
+            item[0],
+        ), reverse=True)]
+        for group in groups.values()
+    ]
+
+
+def visible_scenarios(scenarios):
+    return [dict(group[0], run_count=len(group), latest_run_id=group[0].get('id'),
+                 is_latest_run=True) for group in scenario_run_groups(scenarios)]
+
+
+def scenario_run_history(scenarios, scenario_id):
+    for group in scenario_run_groups(scenarios):
+        if any(str(row.get('id')) == str(scenario_id) for row in group):
+            return group
+    return []
+
+
 def get_scenario_by_id(scenario_id):
-    return next((dict(s) for s in get_cached_data()['scenarios']
-                 if str(s.get('id')) == str(scenario_id)), None)
+    group = scenario_run_history(get_cached_data()['scenarios'], scenario_id)
+    for scenario in group:
+        if str(scenario.get('id')) == str(scenario_id):
+            return dict(scenario, run_count=len(group), latest_run_id=group[0].get('id'),
+                        is_latest_run=str(scenario.get('id')) == str(group[0].get('id')))
+    return None
 
 
 def get_input_by_id(input_id):
@@ -546,7 +595,7 @@ def get_scenarios_for_input(input_id):
     data = get_cached_data()
     links = {str(j['scenario_id']): j.get('component_key', '')
              for j in data['junctions'] if str(j['input_file_id']) == str(input_id)}
-    return [dict(s, component_key=links[str(s['id'])]) for s in data['scenarios']
+    return [dict(s, component_key=links[str(s['id'])]) for s in visible_scenarios(data['scenarios'])
             if str(s['id']) in links]
 
 
@@ -891,7 +940,7 @@ def api_data():
     if not cached:
         return jsonify({'error': 'Could not load data'}), 500
     
-    scenarios = cached['scenarios']
+    scenarios = visible_scenarios(cached['scenarios'])
     junction_records = cached['junctions']
     input_files = cached['inputs']
     
@@ -925,7 +974,7 @@ def api_data():
     return jsonify({
         'scenarios': scenarios,
         'input_files': input_files,
-        'projects': projects
+        'projects': projects,
     })
 
 def link_config_inputs(scenario_id, input_files, upload_date, uploaded_by='Auto-detected'):
@@ -1109,7 +1158,9 @@ def scenario_detail(scenario_id):
     scenario = get_scenario_by_id(scenario_id)
     if not scenario:
         return api_error('Scenario not found', 404)
-    return jsonify({'scenario': scenario, 'input_files': get_input_files_for_scenario(scenario_id)})
+    history = scenario_run_history(get_cached_data()['scenarios'], scenario_id)
+    return jsonify({'scenario': scenario, 'input_files': get_input_files_for_scenario(scenario_id),
+                    'run_history': [dict(s, is_latest_run=index == 0) for index, s in enumerate(history)]})
 
 
 @app.get('/api/inputs/<int:input_id>')

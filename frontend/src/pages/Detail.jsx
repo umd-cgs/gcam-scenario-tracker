@@ -43,7 +43,6 @@ export default function Detail({
   onEdit,
   onDownload,
   onDelete,
-  readOnly,
 }) {
   const { id } = useParams();
   const [result, setResult] = useState(null);
@@ -126,7 +125,6 @@ export default function Detail({
           )}
         </div>
       </header>
-      {readOnly && <p className="demo-notice">Demo preview · Sample data only.</p>}
       {kind === "scenario" && record.is_latest_run === false && (
         <div className="history-notice">
           This is an older run. <Link to={`/scenarios/${encodeURIComponent(record.latest_run_id)}`}>View the latest run</Link>.

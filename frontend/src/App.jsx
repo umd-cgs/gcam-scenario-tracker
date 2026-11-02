@@ -120,16 +120,15 @@ export default function App() {
   }
   const shared = {
     data,
-    readOnly: Boolean(data?.demo),
     loading,
     error,
     reload,
     updatedAt,
     selected,
     onSelection: setSelected,
-    onUpload: data?.demo ? null : () => setDialog({ type: "upload" }),
-    onEdit: data?.demo ? null : onEdit,
-    onDelete: data?.demo ? null : onDelete,
+    onUpload: () => setDialog({ type: "upload" }),
+    onEdit: onEdit,
+    onDelete: onDelete,
     onDownload,
     revision,
   };
