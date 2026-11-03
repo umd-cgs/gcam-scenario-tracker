@@ -1,0 +1,23 @@
+# Local-only preview: compose.local.yaml publishes this listener on 127.0.0.1.
+http://:8081 {
+    bind 127.0.0.1
+    respond /health "ok" 200
+}
+http://:80 {
+    encode gzip
+    request_body {
+        max_size 50MiB
+    }
+    handle /api/* {
+        reverse_proxy backend:8000
+    }
+    handle /ingest_logs {
+        reverse_proxy backend:8000
+    }
+    handle {
+        root * /srv
+        try_files {path} /index.html
+        header Cache-Control "no-cache"
+        file_server
+    }
+}
