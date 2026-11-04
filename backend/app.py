@@ -828,20 +828,20 @@ def list_saved_filters():
 def create_saved_filter():
     body = request.get_json(silent=True)
     if not isinstance(body, dict) or set(body) != {'tab', 'name', 'saved_by', 'filters'}:
-        return api_error('Provide a tab, name, saved by label, and filters')
+        return api_error('Provide a tab, name, saved by label, and view settings')
     tab, name, saved_by = body['tab'], body['name'], body['saved_by']
     if not isinstance(tab, str) or tab not in SAVED_FILTER_COLUMNS:
-        return api_error('Unknown filter tab')
+        return api_error('Unknown view tab')
     if (not isinstance(name, str) or not 1 <= len(name.strip()) <= 80 or
             not isinstance(saved_by, str) or len(saved_by.strip()) > 80):
         return api_error('Name is required (up to 80 characters); saved by is optional (up to 80)')
     state = validate_saved_filter_state(body['filters'], tab)
     if state is None:
-        return api_error('Invalid filter settings')
+        return api_error('Invalid view settings')
     name, saved_by = name.strip(), saved_by.strip()
     if any(view['tab'] == tab and view['name'].casefold() == name.casefold()
            for view in read_saved_filters()):
-        return api_error('A saved filter with this name already exists for this tab', 409)
+        return api_error('A saved view with this name already exists for this tab', 409)
     view = {'id': str(uuid.uuid4()), 'tab': tab, 'name': name,
             'saved_by': saved_by, 'filters': state,
             'created_at': datetime.now().astimezone().isoformat(timespec='seconds')}
@@ -855,17 +855,17 @@ def create_saved_filter():
 def update_saved_filter(view_id):
     body = request.get_json(silent=True)
     if not isinstance(body, dict) or set(body) != {'filters'}:
-        return api_error('Provide filter settings')
+        return api_error('Provide view settings')
     row = find_row_by_id(saved_filters_sheet, view_id)
     if not row or row == 1:
-        return api_error('Saved filter not found', 404)
+        return api_error('Saved view not found', 404)
     values = (saved_filters_sheet.row_values(row) + [''] * 6)[:6]
     tab = values[1]
     if tab not in SAVED_FILTER_COLUMNS:
-        return api_error('Saved filter is invalid', 502)
+        return api_error('Saved view is invalid', 502)
     state = validate_saved_filter_state(body['filters'], tab)
     if state is None:
-        return api_error('Invalid filter settings')
+        return api_error('Invalid view settings')
     saved_filters_sheet.update_cell(row, 5, json.dumps(state, separators=(',', ':')))
     return jsonify({'id': view_id, 'tab': tab, 'name': values[2],
                     'saved_by': values[3], 'filters': state, 'created_at': values[5]})
@@ -875,7 +875,7 @@ def update_saved_filter(view_id):
 def delete_saved_filter(view_id):
     row = find_row_by_id(saved_filters_sheet, view_id)
     if not row or row == 1:
-        return api_error('Saved filter not found', 404)
+        return api_error('Saved view not found', 404)
     saved_filters_sheet.delete_rows(row)
     return jsonify({'status': 'success'})
 
