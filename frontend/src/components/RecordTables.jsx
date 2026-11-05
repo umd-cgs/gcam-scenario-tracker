@@ -108,7 +108,7 @@ export function ScenarioTable({
           job_id: "Job ID",
           component_key: "Component",
         }[key] || key[0].toUpperCase() + key.slice(1),
-      hidden: true,
+      hidden: !["errors", "additional_notes"].includes(key),
     })),
     dateColumn("finished", "Finished", true),
     dateColumn("date_run", "Run date", true),
@@ -181,6 +181,7 @@ export function ScenarioTable({
       onSavedColumnFiltersChange={onSavedColumnFiltersChange}
       savedColumnVisibility={savedColumnVisibility}
       onSavedColumnVisibilityChange={onSavedColumnVisibilityChange}
+      showFiltersInitially={!compact}
       emptyTitle="No scenarios found"
       emptyText="Adjust your filters, or upload a configuration to start tracking a scenario."
     />
@@ -261,6 +262,7 @@ export function InputTable({
       onSavedColumnFiltersChange={onSavedColumnFiltersChange}
       savedColumnVisibility={savedColumnVisibility}
       onSavedColumnVisibilityChange={onSavedColumnVisibilityChange}
+      showFiltersInitially={!compact}
       initialSort="file_name"
       initialDirection="asc"
       emptyTitle="No input files found"

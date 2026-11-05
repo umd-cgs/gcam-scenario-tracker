@@ -56,6 +56,10 @@ export default function Dashboard({
   const isModified = selectedSaved &&
     JSON.stringify(currentFilters) !== JSON.stringify(selectedSaved.filters);
   function applySavedFilter(id) {
+    if (!id) {
+      window.location.reload();
+      return;
+    }
     setSelectedSavedId(id);
     setConfirmDelete(false);
     setFilterError("");
@@ -72,7 +76,9 @@ export default function Dashboard({
     setProject("");
     setStatus("");
     setSavedColumnFilters([]);
+    setSavedColumnVisibility({});
     setSelectedSavedId("");
+    setConfirmDelete(false);
   }
   async function saveFilter(event) {
     event.preventDefault();
@@ -232,21 +238,22 @@ export default function Dashboard({
               </select>
             </>
           )}
-          {(search || project || status || savedColumnFilters.length > 0) && (
+          {(search || project || status || savedColumnFilters.length > 0 ||
+            Object.keys(savedColumnVisibility).length > 0 || selectedSavedId) && (
             <button className="button quiet small" onClick={resetFilters}>
-              Reset filters
+              Reset view
             </button>
           )}
         </div>
         <div className="saved-filter-bar">
           <label>
-            Saved filters
+            Saved views
             <select
-              aria-label="Saved filters"
+              aria-label="Saved views"
               value={selectedSavedId}
               onChange={(event) => applySavedFilter(event.target.value)}
             >
-              <option value="">Choose a saved filter</option>
+              <option value="">Choose a saved view</option>
               {savedFilters.map((item) => (
                 <option key={item.id} value={item.id}>
                   {item.name}{item.saved_by ? ` · ${item.saved_by}` : ""}
@@ -258,11 +265,11 @@ export default function Dashboard({
             setShowSaveForm((value) => !value);
             setFilterError("");
           }}>
-            Save current filters
+            Save current view
           </button>
           {selectedSaved && isModified && (
             <button className="button quiet small" disabled={filterBusy} onClick={updateFilter}>
-              Update saved filter
+              Update saved view
             </button>
           )}
           {selectedSaved && (
@@ -275,7 +282,7 @@ export default function Dashboard({
               </span>
             ) : (
               <button className="button quiet small danger-text" onClick={() => setConfirmDelete(true)}>
-                Delete saved filter
+                Delete saved view
               </button>
             )
           )}
@@ -284,7 +291,7 @@ export default function Dashboard({
         {showSaveForm && (
           <form className="saved-filter-form" onSubmit={saveFilter}>
             <label>
-              Filter name
+              View name
               <input value={filterName} onChange={(event) => setFilterName(event.target.value)}
                 maxLength={80} required placeholder="e.g. Needs review" />
             </label>
@@ -293,7 +300,7 @@ export default function Dashboard({
               <input value={savedBy} onChange={(event) => setSavedBy(event.target.value)}
                 maxLength={80} placeholder="Your name" />
             </label>
-            <button className="button primary small" disabled={filterBusy}>Save filter</button>
+            <button className="button primary small" disabled={filterBusy}>Save view</button>
           </form>
         )}
         {filterError && <p className="saved-filter-error" role="alert">{filterError}</p>}

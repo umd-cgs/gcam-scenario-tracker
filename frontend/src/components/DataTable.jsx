@@ -29,6 +29,7 @@ export default function DataTable({
   onSelection,
   initialSort = "recency",
   initialDirection = "desc",
+  showFiltersInitially = true,
   savedColumnFilters,
   onSavedColumnFiltersChange,
   savedColumnVisibility,
@@ -37,7 +38,7 @@ export default function DataTable({
   emptyText = "Try adjusting your search or filters.",
 }) {
   const columnMenuRef = useRef(null);
-  const [showFilters, setShowFilters] = useState(false);
+  const [showFilters, setShowFilters] = useState(showFiltersInitially);
   const [sorting, setSorting] = useState([
     { id: initialSort, desc: initialDirection === "desc" },
   ]);
