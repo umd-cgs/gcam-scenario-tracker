@@ -1,0 +1,40 @@
+# Only container-local health checks use this listener; port 8081 is never published.
+http://:8081 {
+    bind 127.0.0.1
+    respond /health "ok" 200
+}
+
+{$SITE_ADDRESS} {
+    encode zstd gzip
+    request_body {
+        max_size 50MiB
+    }
+    header {
+        X-Content-Type-Options nosniff
+        Referrer-Policy same-origin
+        X-Frame-Options DENY
+        Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+    }
+
+    # Machine clients use X-Ingest-Token, validated by Flask, rather than browser auth.
+    handle /ingest_logs {
+        reverse_proxy backend:8000
+    }
+
+    handle {
+        basic_auth {
+            {$BASIC_AUTH_USER} {$BASIC_AUTH_HASH}
+        }
+        handle /api/* {
+            reverse_proxy backend:8000
+        }
+        handle {
+            root * /srv
+            route {
+                try_files {path} /index.html
+                header Cache-Control "no-cache"
+                file_server
+            }
+        }
+    }
+}

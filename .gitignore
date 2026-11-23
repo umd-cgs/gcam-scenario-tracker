@@ -41,3 +41,33 @@ Thumbs.db
 
 # Logs
 *.log
+
+# React / Node
+node_modules/
+frontend/dist/
+.npm/
+
+# Local environments and deployment secrets
+.venv/
+.env.*
+!.env.example
+!*.env.example
+secrets/
+*.pem
+*.key
+
+# Built images and deployment bundles
+artifacts/
+*.tar
+*.tar.gz
+
+# Test and tooling output
+.pytest_cache/
+.coverage
+htmlcov/
+test-results/
+playwright-report/
+.playwright/
+
+# Recoverable local copies of retired code and old deployment bundles
+.local-archive/
