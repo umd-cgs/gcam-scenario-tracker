@@ -1452,3 +1452,13 @@ textarea,
     transition: none !important;
   }
 }
+
+.configuration-comparison th,
+.configuration-comparison td {
+  min-width: 260px;
+  overflow-wrap: anywhere;
+}
+.configuration-comparison td.comparison-missing {
+  background: #ffff00;
+  color: #17212b;
+}

@@ -7,6 +7,7 @@ A Flask app that stores data in Google Sheets and files in Google Drive
 import os
 import json
 import difflib
+import posixpath
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1352,214 +1353,91 @@ def add_zaratan_columns():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.get('/api/comparisons/export')
-def compare_scenarios():
-    """Compare multiple scenarios and generate a report"""
-    try:
-        print("DEBUG: Compare scenarios route called")
-        print(f"DEBUG: Request args: {request.args}")
-        scenario_ids = list(dict.fromkeys(i.strip() for i in request.args.get('ids', '').split(',') if i.strip()))
-        print(f"DEBUG: Scenario IDs: {scenario_ids}")
-        
-        if len(scenario_ids) < 2:
-            return api_error('Select at least two distinct scenarios')
-        
-        if not sheets_available():
-            return api_error('Google Sheets connection unavailable', 503)
-        
-        # Get all scenarios
-        scenarios = []
-        for scenario_id in scenario_ids:
-            print(f"DEBUG: Getting scenario {scenario_id}")
-            scenario = get_scenario_by_id(scenario_id)
-            if scenario:
-                # Get input files for this scenario
-                input_files = get_input_files_for_scenario(scenario_id)
-                scenario['input_file_names'] = set([f['file_name'] for f in input_files])
-                scenarios.append(scenario)
-                print(f"DEBUG: Found scenario with {len(input_files)} input files")
-            else:
-                print(f"DEBUG: Scenario {scenario_id} not found")
-        
-        if len(scenarios) != len(scenario_ids):
-            return api_error('One or more selected scenarios were not found', 404)
-        
-        shared_files = set.intersection(*[s['input_file_names'] for s in scenarios])
-
-        import io
-        from openpyxl import Workbook
-        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-        
-        wb = Workbook()
-        
-        # Build file -> folder map and file -> scenarios map
-        file_folder_map = {}
-        file_scenario_map = {}
-        
-        # Get folder info from input files sheet
+def configuration_comparison():
+    """Load archived configurations and align their ordered component paths."""
+    ids = list(dict.fromkeys(value.strip() for value in request.args.get('ids', '').split(',') if value.strip()))
+    if len(ids) < 2:
+        return None, api_error('Select at least two distinct scenarios')
+    scenarios = [get_scenario_by_id(scenario_id) for scenario_id in ids]
+    if any(scenario is None for scenario in scenarios):
+        return None, api_error('One or more selected scenarios were not found', 404)
+    sequences = []
+    for scenario in scenarios:
+        label = f"{scenario.get('scenario_name', 'Scenario')} ({scenario['id']})"
+        if not scenario.get('config_file_id'):
+            return None, api_error(f'No archived configuration is available for {label}', 404)
+        content = get_file_content(scenario['config_file_id'])
+        if not content:
+            return None, api_error(f'Could not retrieve the archived configuration for {label}', 502)
         try:
-            all_inputs = read_input_records()
-            for inp in all_inputs:
-                file_folder_map[inp.get('file_name', '')] = inp.get('folder_location', '')
-        except:
-            pass
-        
-        scenario_names_list = [f"{s['scenario_name']} ({s['id']})" for s in scenarios]
-        scenario_labels = {str(s['id']): name for s, name in zip(scenarios, scenario_names_list)}
-        scenario_keys = [str(s['id']) for s in scenarios]
-        
-        for scenario in scenarios:
-            for file_name in scenario['input_file_names']:
-                if file_name not in file_scenario_map:
-                    file_scenario_map[file_name] = set()
-                file_scenario_map[file_name].add(str(scenario['id']))
-        
-        all_files_sorted = sorted(file_scenario_map.keys())
-        total_scenarios = len(scenarios)
-        
-        # Styles - only for headers
-        header_font = Font(bold=True, color="FFFFFF", size=11)
-        header_fill = PatternFill("solid", fgColor="991B1B")
-        border = Border(
-            left=Side(style='thin', color='D1D5DB'),
-            right=Side(style='thin', color='D1D5DB'),
-            top=Side(style='thin', color='D1D5DB'),
-            bottom=Side(style='thin', color='D1D5DB')
-        )
-        center_align = Alignment(horizontal='center', vertical='center')
-        
-        # --- Sheet 1: Summary (first tab) ---
-        ws1 = wb.active
-        ws1.title = "Summary"
-        
-        summary_headers = ["File Name", "Folder", "Status", "Present In"]
-        for col, header in enumerate(summary_headers, 1):
-            cell = ws1.cell(row=1, column=col, value=header)
-            cell.font = header_font
-            cell.fill = header_fill
-            cell.alignment = center_align
-            cell.border = border
-        
-        current_row = 2
-        
-        # Unique files first
-        for file_name in all_files_sorted:
-            present_in = file_scenario_map.get(file_name, set())
-            if len(present_in) < total_scenarios:
-                folder = file_folder_map.get(file_name, '')
-                
-                if len(present_in) == 1:
-                    status = f"Unique to {scenario_labels[next(iter(present_in))]}"
-                    present_str = ''  # Leave empty for unique files
-                else:
-                    status = f"In {len(present_in)} of {total_scenarios} scenarios"
-                    present_str = "; ".join(scenario_labels[key] for key in sorted(present_in))
-                
-                ws1.cell(row=current_row, column=1, value=file_name).border = border
-                ws1.cell(row=current_row, column=2, value=folder).border = border
-                ws1.cell(row=current_row, column=3, value=status).border = border
-                ws1.cell(row=current_row, column=4, value=present_str).border = border
-                current_row += 1
-        
-        # Separator row
-        sep_cell = ws1.cell(row=current_row, column=1, value=f"--- SHARED FILES ({len(shared_files)} files in all {total_scenarios} scenarios) ---")
-        sep_cell.font = Font(bold=True)
-        current_row += 1
-        
-        # Shared files
-        for file_name in sorted(shared_files):
-            folder = file_folder_map.get(file_name, '')
-            present_str = "; ".join(scenario_names_list)
-            
-            ws1.cell(row=current_row, column=1, value=file_name).border = border
-            ws1.cell(row=current_row, column=2, value=folder).border = border
-            ws1.cell(row=current_row, column=3, value="Shared by all").border = border
-            ws1.cell(row=current_row, column=4, value=present_str).border = border
-            current_row += 1
-        
-        ws1.column_dimensions['A'].width = 40
-        ws1.column_dimensions['B'].width = 20
-        ws1.column_dimensions['C'].width = 30
-        ws1.column_dimensions['D'].width = 50
-        ws1.freeze_panes = 'A2'
-        
-        # --- Sheet 2: Presence Matrix ---
-        ws2 = wb.create_sheet("Presence Matrix")
-        
-        headers = ["File Name", "Folder"] + scenario_names_list
-        for col, header in enumerate(headers, 1):
-            cell = ws2.cell(row=1, column=col, value=header)
-            cell.font = header_font
-            cell.fill = header_fill
-            cell.alignment = center_align
-            cell.border = border
-        
-        # Data rows - no fill colors, just 1/0
-        for row_idx, file_name in enumerate(all_files_sorted, 2):
-            folder = file_folder_map.get(file_name, '')
-            present_in = file_scenario_map.get(file_name, set())
-            
-            ws2.cell(row=row_idx, column=1, value=file_name).border = border
-            ws2.cell(row=row_idx, column=2, value=folder).border = border
-            
-            for sc_idx, sc_name in enumerate(scenario_keys, 3):
-                is_present = sc_name in present_in
-                cell = ws2.cell(row=row_idx, column=sc_idx, value=1 if is_present else 0)
-                cell.alignment = center_align
-                cell.border = border
-        
-        # Summary row
-        summary_row = len(all_files_sorted) + 3
-        ws2.cell(row=summary_row, column=1, value="TOTAL FILES").font = Font(bold=True)
-        for sc_idx, sc_name in enumerate(scenario_keys, 3):
-            count = sum(1 for f in all_files_sorted if sc_name in file_scenario_map.get(f, set()))
-            cell = ws2.cell(row=summary_row, column=sc_idx, value=count)
-            cell.font = Font(bold=True)
-            cell.alignment = center_align
-        
-        ws2.column_dimensions['A'].width = 40
-        ws2.column_dimensions['B'].width = 20
-        from openpyxl.utils import get_column_letter
-        for i in range(3, 3 + len(scenario_names_list)):
-            ws2.column_dimensions[get_column_letter(i)].width = max(15, len(scenario_names_list[i-3]) + 4)
-        ws2.freeze_panes = 'A2'
-        
-        # Save
-        xlsx_buffer = io.BytesIO()
-        for worksheet in wb:
-            for row in worksheet:
-                for cell in row:
-                    if cell.data_type == 'f':
-                        cell.data_type = 's'
-        wb.save(xlsx_buffer)
-        xlsx_buffer.seek(0)
-        
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        return Response(
-            xlsx_buffer.getvalue(),
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            headers={'Content-Disposition': f'attachment;filename=scenario_comparison_{timestamp}.xlsx'}
-        )
-        
-    except Exception as e:
-        import traceback
-        print(f"Comparison error: {traceback.format_exc()}")
-        return api_error('Could not generate the comparison report', 502)
+            entries = parse_configuration_xml(content)['input_files']
+        except Exception:
+            return None, api_error(f'Could not parse the archived configuration for {label}', 422)
+        sequences.append([{'path': entry['file_path'],
+                           'key': posixpath.normpath(entry['file_path'].replace('\\', '/'))}
+                          for entry in entries])
+
+    # Progressively align each sequence to existing rows. SequenceMatcher preserves
+    # the order of every column, including repeated paths and reordered entries.
+    rows = []
+    for index, sequence in enumerate(sequences):
+        keys = [next(cell['key'] for cell in row if cell is not None) for row in rows]
+        matcher = difflib.SequenceMatcher(None, keys, [entry['key'] for entry in sequence], autojunk=False)
+        aligned = []
+        for tag, a1, a2, b1, b2 in matcher.get_opcodes():
+            if tag == 'equal':
+                for row, entry in zip(rows[a1:a2], sequence[b1:b2]):
+                    aligned.append(row + [entry])
+            else:
+                aligned.extend(row + [None] for row in rows[a1:a2])
+                aligned.extend([None] * index + [entry] for entry in sequence[b1:b2])
+        rows = aligned
+    memberships = [set(entry['key'] for entry in sequence) for sequence in sequences]
+    for row in rows:
+        for cell in row:
+            if cell is not None:
+                cell['missing'] = not all(cell['key'] in membership for membership in memberships)
+                del cell['key']
+    return {'scenarios': scenarios, 'rows': rows}, None
 
 
 @app.get('/api/comparisons')
 def comparison_data():
-    ids = list(dict.fromkeys(value.strip() for value in request.args.get('ids', '').split(',') if value.strip()))
-    if len(ids) < 2:
-        return api_error('Select at least two distinct scenarios')
-    records = []
-    for scenario_id in ids:
-        scenario = get_scenario_by_id(scenario_id)
-        if scenario is None:
-            return api_error('One or more selected scenarios were not found', 404)
-        records.append({'scenario': scenario, 'input_files': get_input_files_for_scenario(scenario_id)})
-    return jsonify({'scenarios': records})
+    comparison, error = configuration_comparison()
+    return error if error else jsonify(comparison)
+
+
+@app.get('/api/comparisons/export')
+def compare_scenarios():
+    comparison, error = configuration_comparison()
+    if error:
+        return error
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = 'Configuration comparison'
+    yellow = PatternFill('solid', fgColor='FFFF00')
+    for index, scenario in enumerate(comparison['scenarios'], 1):
+        cell = sheet.cell(1, index, f"{scenario.get('scenario_name', 'Scenario')} ({scenario['id']})")
+        cell.font = Font(bold=True)
+        sheet.column_dimensions[get_column_letter(index)].width = 55
+    for row_index, row in enumerate(comparison['rows'], 2):
+        for column_index, entry in enumerate(row, 1):
+            if entry is not None:
+                cell = sheet.cell(row_index, column_index, entry['path'])
+                cell.data_type = 's'
+                if entry['missing']:
+                    cell.fill = yellow
+    sheet.freeze_panes = 'A2'
+    output = io.BytesIO()
+    workbook.save(output)
+    return Response(output.getvalue(),
+                    mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    headers={'Content-Disposition': 'attachment;filename=scenario_comparison.xlsx'})
+
 
 @app.delete('/api/scenarios/<scenario_id>')
 def delete_scenario(scenario_id):
